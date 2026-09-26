@@ -1,0 +1,42 @@
+[project]
+name = "crsd"
+version = "0.1.0"
+description = "Causal Step-Routing Distillation (CSRD) for long-CoT students (Qwen3-8B -> Qwen3-1.7B/4B-Base)."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Same pinned stack as SpectralGuidedLearning/ so one venv can serve both projects:
+    # torch/vllm/transformers are validated together.
+    "torch==2.13.0",
+    "torchvision==0.28.0",
+    "torchaudio==2.11.0",
+    "vllm==0.27.1",
+    "transformers==5.5.3",
+    "peft>=0.13",
+    "deepspeed>=0.15",
+    "datasets>=2.20",
+    "accelerate>=1.0",
+    "numpy>=2.0,<2.5",
+    "scipy>=1.13",
+    "scikit-learn>=1.5",   # D3 logistic regression / AUC
+    "pandas>=2.2",
+    "pyarrow",
+    "matplotlib",
+    "pyyaml",
+    "tqdm",
+    "safetensors",
+    "math-verify==0.8.0",
+    "pytest",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch", marker = "sys_platform == 'linux'" }
+torchvision = { index = "pytorch", marker = "sys_platform == 'linux'" }
+torchaudio = { index = "pytorch", marker = "sys_platform == 'linux'" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

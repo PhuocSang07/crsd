@@ -1,0 +1,15 @@
+#d
+#datasets
+--hf-dataset simplescaling/s1K /mnt/local/_data/@PROJECT@/s1K
+--hf-dataset simplescaling/s1K-1.1 /mnt/local/_data/@PROJECT@/s1K-1.1
+--hf-dataset DigitalLearningGmbH/MATH-lighteval /mnt/local/_data/@PROJECT@/MATH-lighteval
+--hf-dataset math-ai/aime24 /mnt/local/_data/@PROJECT@/aime24
+--hf-dataset math-ai/aime25 /mnt/local/_data/@PROJECT@/aime25
+--hf-dataset HuggingFaceH4/MATH-500 /mnt/local/_data/@PROJECT@/MATH-500
+--hf-dataset AI-MO/aimo-validation-amc /mnt/local/_data/@PROJECT@/aimo-validation-amc
+#models
+--hf Qwen/Qwen3-8B /mnt/local/_models/@PROJECT@/Qwen3-8B
+--hf Qwen/Qwen3-1.7B-Base /mnt/local/_models/@PROJECT@/Qwen3-1.7B-Base
+--hf Qwen/Qwen3-4B-Base /mnt/local/_models/@PROJECT@/Qwen3-4B-Base
+
+(this line and below are ignored)
