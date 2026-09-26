@@ -1,6 +1,8 @@
 """Distance-controlled error injection (proposal Sec. 6.7, Appendix C).
 
-    --stage build     from correct held-out teacher traces: a number r introduced in step j, absent from
+    --stage build     from correct held-out traces, rendered as the *student* reads them (data_prep.py
+                      --style sgl records, so the student continues its own training format): a number r
+                      introduced in step j, absent from
                       steps j+1..j+2 and first reused at step i with i - j in [4,16), [16,64) or [64,inf)
                       (d in {4, 16, 64}), is corrupted in step j only (r +- 1, r x 10 or r / 10, sign flip);
                       the prefix is cut after step j + 2. Each case has a control twin (clean prefix).
@@ -19,7 +21,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from answer_scoring import score_generation
+import palign_grader
 from prompting import stop_token_ids
 
 DISTANCES = (4, 16, 64)
@@ -153,7 +155,7 @@ def score(cases: list[dict]) -> dict:
                 groups[key]["states_r"].append(states)
                 groups[key]["recheck"].append(int(bool(_RECHECK.search(text))))
                 if case["gold"]:
-                    groups[key]["recovery"].append(int(score_generation(case["prefix"] + text, case["gold"], "math")))
+                    groups[key]["recovery"].append(palign_grader.grade([case["prefix"] + text], case["gold"])[0])
     mean = lambda v: sum(v) / len(v) if v else float("nan")  # noqa: E731
     report = {"/".join(map(str, key)): {metric: mean(values) for metric, values in metrics.items()}
               | {"n": len(metrics["states_r"])}
@@ -170,7 +172,7 @@ def score(cases: list[dict]) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=("build", "generate", "score"), required=True)
-    parser.add_argument("--records", help="held-out teacher records (build)")
+    parser.add_argument("--records", help="held-out student records, --style sgl (build)")
     parser.add_argument("--cases", required=True, help="cases JSONL (build output / generate+score input)")
     parser.add_argument("--output", help="generate: cases with continuations; score: report JSON")
     parser.add_argument("--per-distance", type=int, default=34, help="cases per distance (3 x 34 ~ 100 in the pilot)")

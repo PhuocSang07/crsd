@@ -1,31 +1,27 @@
-"""Tokenize traces for one model and map the step nodes onto its tokens.
+"""Render canonical traces for one model and map the step nodes onto its tokens.
 
-Input: traces JSONL from generate_traces.py --stage select ({id, question, prompt, response, ...}),
-or s1K-1.1's DeepSeek-R1 traces (--source s1k11-r1, variant A15: the teacher only re-reads them).
-Output: one record per trace with
+Input: canonical JSONL (build_canonical.py). Output: one record per trace with
 
-    input_ids               prompt ids + response ids + <|im_end|>
-    response_token_span     [start, end) of the response (the supervised part; the stop token after it too)
-    nodes                   [{kind, char_start, char_end, token_start, token_end}], v0 = q ... v_{n+1} = a
+    input_ids               prompt ids + response ids + the tokenizer's eos token (SGL convention)
+    response_token_span     [start, end) of the response (supervised, together with the eos token)
+    nodes                   [{kind, char_start, char_end, token_start, token_end, hash}], v0 = q ... v_{n+1} = a
 
-Prompt and response are tokenized separately and concatenated, exactly as the student is trained,
-so the same record serves training and teacher-forced extraction. Run once per tokenizer; the node
-character spans are identical across models by construction (and asserted by extract_routing.py).
+--style sgl renders the student's training text exactly as SpectralGuidedLearning/data_prep.py does
+(the baselines' format); --style thinking renders how a teacher reads a trace as its own reasoning.
+Prompt and response are tokenized separately and concatenated, as the student is trained. Node hashes
+are what matches a teacher's routing signals to any student's records.
 """
 
 import argparse
 import json
 import statistics
-import unicodedata
 from pathlib import Path
 
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from prompting import END_OF_TURN, THINK_CLOSE, THINK_OPEN, question_char_span, render_prompt
+from prompting import STYLES, render
 from step_nodes import MAX_STEPS, MIN_STEP_CHARS, SEGMENT_MODES, assign_token_spans, build_nodes
-
-SOURCES = ("traces", "s1k11-r1")
 
 
 def encode_offsets(tokenizer, text: str, base: int) -> tuple[list[int], list[int]]:
@@ -33,70 +29,47 @@ def encode_offsets(tokenizer, text: str, base: int) -> tuple[list[int], list[int
     return encoding["input_ids"], [base + start for start, _ in encoding["offset_mapping"]]
 
 
-def build_record(tokenizer, trace: dict, args) -> tuple[dict | None, str]:
+def build_record(tokenizer, content: dict, args) -> tuple[dict | None, str]:
     """(record, "ok") or (None, reason)."""
-    prompt = trace["prompt"]
-    response = unicodedata.normalize("NFC", trace["response"])
-    q_span = question_char_span(prompt, trace["question"])
-    nodes = build_nodes(prompt, response, q_span, mode=args.segment_mode, min_chars=args.min_step_chars,
-                        max_steps=args.max_steps, allow_unclosed=getattr(args, "allow_unclosed", False))
-    if nodes is None:
-        return None, "no_closed_think_or_empty_answer"
+    if not content.get("closed", True) and not args.allow_unclosed:
+        return None, "unclosed"
+    rendered = render(tokenizer, content, args.style)
+    if rendered is None:
+        return None, "content_not_verbatim"
+    nodes = build_nodes(rendered, mode=args.segment_mode, min_chars=args.min_step_chars, max_steps=args.max_steps)
+    prompt, response = rendered["prompt"], rendered["response"]
 
     prompt_ids, prompt_starts = encode_offsets(tokenizer, prompt, 0)
     response_ids, response_starts = encode_offsets(tokenizer, response, len(prompt))
-    stop_id = tokenizer.convert_tokens_to_ids(END_OF_TURN)
-    if stop_id is None or stop_id == tokenizer.unk_token_id:
-        raise ValueError(f"tokenizer has no {END_OF_TURN} token")
-    input_ids = prompt_ids + response_ids + [stop_id]
-    if len(input_ids) > args.max_tokens:
+    if tokenizer.eos_token_id is None:
+        raise ValueError("tokenizer has no eos token")
+    input_ids = prompt_ids + response_ids + [tokenizer.eos_token_id]
+    if len(prompt_ids) + len(response_ids) > args.max_tokens:  # SGL's rule: the eos token is not counted
         return None, "too_long"
-
     # The stop token starts past the text so no node can claim it.
-    token_starts = prompt_starts + response_starts + [len(prompt) + len(response)]
-    spans = assign_token_spans(nodes, token_starts)
+    spans = assign_token_spans(nodes, prompt_starts + response_starts + [len(prompt) + len(response)])
     if spans is None:
         return None, "empty_node"
     for node, (start, end) in zip(nodes, spans):
         node["token_start"], node["token_end"] = start, end
-    return {
-        "id": trace["id"],
-        "question": trace["question"],
-        "gold": trace.get("gold"),
+    record = {
+        "id": content["id"],
+        "question": content["question"],
+        "gold": content.get("gold"),
         "prompt": prompt,
         "response": response,
         "input_ids": input_ids,
         "response_token_span": [len(prompt_ids), len(prompt_ids) + len(response_ids)],
         "nodes": nodes,
         "n_steps": sum(n["kind"] == "step" for n in nodes),
-        "closed": nodes[-1]["kind"] == "answer",
         "n_tokens": len(input_ids),
-        "teacher_solve_rate": trace.get("teacher_solve_rate"),
-    }, "ok"
-
-
-def iter_traces(args, template_tokenizer):
-    if args.source == "traces":
-        with open(args.traces_path) as handle:
-            for line in handle:
-                yield json.loads(line)
-        return
-    # A15: s1K-1.1's DeepSeek-R1 traces; the prompt is still the teacher's chat template.
-    from datasets import load_dataset
-
-    rows = load_dataset(args.traces_path or "simplescaling/s1K-1.1", split="train")
-    for index, row in enumerate(rows):
-        response = (
-            f"{THINK_OPEN}\n{row['deepseek_thinking_trajectory'].strip()}\n{THINK_CLOSE}\n\n"
-            f"{row['deepseek_attempt'].strip()}"
-        )
-        yield {
-            "id": f"s1k11-{index}",
-            "question": row["question"],
-            "gold": None,
-            "prompt": render_prompt(template_tokenizer, row["question"], enable_thinking=True),
-            "response": response,
-        }
+        "closed": nodes[-1]["kind"] == "answer",
+        "style": args.style,
+    }
+    for key in ("correct", "teacher_solve_rate", "source"):
+        if key in content:
+            record[key] = content[key]
+    return record, "ok"
 
 
 def percentiles(values: list[float]) -> str:
@@ -116,7 +89,6 @@ def log_stats(records: list[dict]) -> dict:
     print(f"tokens/trace : mean={statistics.mean(tokens):.0f} {percentiles(tokens)}")
     print(f"steps/trace  : mean={statistics.mean(steps):.1f} {percentiles(steps)}")
     print(f"tokens/step  : mean={statistics.mean(step_tokens):.1f} {percentiles(step_tokens)}")
-    # Number of (row, far-target) pairs per distance bin at d_min = 4.
     bins = {"[4,8)": 0, "[8,16)": 0, "[16,32)": 0, "[32,64)": 0, "[64,inf)": 0}
     for n in steps:
         for i in range(1, n + 2):
@@ -124,31 +96,29 @@ def log_stats(records: list[dict]) -> dict:
                 d = i - j
                 key = "[4,8)" if d < 8 else "[8,16)" if d < 16 else "[16,32)" if d < 32 else "[32,64)" if d < 64 else "[64,inf)"
                 bins[key] += 1
-    print("far pairs by distance: " + " ".join(f"{k}={v}" for k, v in bins.items()))
+    print("far pairs by distance (d_min = 4): " + " ".join(f"{k}={v}" for k, v in bins.items()))
     return {"tokens": percentiles(tokens), "steps": percentiles(steps), "pairs_by_distance": bins}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--traces-path", help="traces JSONL (source=traces) or s1K-1.1 mirror (source=s1k11-r1)")
-    parser.add_argument("--source", choices=SOURCES, default="traces")
+    parser.add_argument("--canonical", required=True, help="canonical JSONL from build_canonical.py")
     parser.add_argument("--tokenizer", required=True, help="the model these records are for")
-    parser.add_argument("--template-tokenizer", help="chat template for s1k11-r1 prompts (the teacher)")
+    parser.add_argument("--style", choices=STYLES, required=True, help="sgl = student training text; thinking = teacher reading")
     parser.add_argument("--output-path", required=True)
     parser.add_argument("--segment-mode", choices=SEGMENT_MODES, default="paragraph")
     parser.add_argument("--min-step-chars", type=int, default=MIN_STEP_CHARS)
     parser.add_argument("--max-steps", type=int, default=MAX_STEPS)
     parser.add_argument("--max-tokens", type=int, default=32768)
-    parser.add_argument("--limit", type=int)
     parser.add_argument("--allow-unclosed", action="store_true",
-                        help="keep responses cut before </think> (no answer node); for D3 on student rollouts")
+                        help="keep truncated responses (no answer node); for D3 on student rollouts")
+    parser.add_argument("--limit", type=int)
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    template = AutoTokenizer.from_pretrained(args.template_tokenizer) if args.template_tokenizer else tokenizer
     records, reasons = [], {}
-    for trace in tqdm(iter_traces(args, template), desc="nodes", unit="trace"):
-        record, reason = build_record(tokenizer, trace, args)
+    for line in tqdm(open(args.canonical), desc="nodes", unit="trace"):
+        record, reason = build_record(tokenizer, json.loads(line), args)
         reasons[reason] = reasons.get(reason, 0) + 1
         if record is not None:
             records.append(record)
@@ -160,7 +130,7 @@ def main() -> None:
     with output.open("w") as handle:
         for record in records:
             handle.write(json.dumps(record) + "\n")
-    print(f"wrote {len(records)} records -> {output}  ({reasons})")
+    print(f"wrote {len(records)} records ({args.style}) -> {output}  ({reasons})")
     stats = log_stats(records)
     Path(str(output) + ".stats.json").write_text(json.dumps({"counts": reasons, **stats}, indent=2))
 

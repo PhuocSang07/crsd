@@ -28,6 +28,7 @@ import torch
 from pass_at_k import paired_permutation_test
 from receiver_heads import vertical_scores
 from routing import DISTANCE_BINS, causal_target, far_target_mask, js_divergence, routing_gap_by_bin
+from signal_bank import SignalSource
 
 REFLECTION_MARKERS = re.compile(r"\b(wait|hmm|alternatively|let me (?:check|verify|double[- ]check)|actually|but let me)\b", re.I)
 BIN_NAMES = ["[4,8)", "[8,16)", "[16,32)", "[32,64)", "[64,inf)"]
@@ -35,23 +36,24 @@ BIN_NAMES = ["[4,8)", "[8,16)", "[16,32)", "[32,64)", "[64,inf)"]
 BIN_CENTRES = [math.sqrt(4 * 8), math.sqrt(8 * 16), math.sqrt(16 * 32), math.sqrt(32 * 64), math.sqrt(64 * 128)]
 
 
-def load_pairs(teacher_dir: Path, student_dir: Path) -> list[dict]:
-    """Matched (teacher, student) routing per trace; node character spans must agree."""
+def load_pairs(teacher: Path, student: Path) -> list[dict]:
+    """Matched (teacher, student) routing per trace (banks or targets dirs); node hashes must agree."""
+    t_src, s_src = SignalSource(str(teacher)), SignalSource(str(student))
+    shared = sorted(set(t_src.ids()) & set(s_src.ids()))
     pairs = []
-    for t_path in sorted(teacher_dir.glob("*.npz")):
-        s_path = student_dir / t_path.name
-        if not s_path.exists():
-            continue
-        t, s = np.load(t_path), np.load(s_path)
-        if not np.array_equal(t["char_spans"], s["char_spans"]):
-            raise ValueError(f"{t_path.stem}: teacher and student nodes differ")
+    for trace_id in shared:
+        t, s = t_src.get(trace_id), s_src.get(trace_id)
+        if not np.array_equal(t["hash"], s["hash"]):
+            raise ValueError(f"{trace_id}: teacher and student nodes differ")
         pairs.append({
-            "id": t_path.stem, "P": torch.from_numpy(t["P"]), "Q": torch.from_numpy(s["Q"] if "Q" in s else s["P"]),
-            "rows": torch.from_numpy(t["rows"]) & torch.from_numpy(s["rows"]),
+            "id": trace_id,
+            "P": torch.from_numpy(np.asarray(t["P"], dtype=np.float32)),
+            "Q": torch.from_numpy(np.asarray(s["P"], dtype=np.float32)),
+            "rows": torch.from_numpy(np.asarray(t["rows"]).astype(bool) & np.asarray(s["rows"]).astype(bool)),
             "nll": float(s["nll"]) if "nll" in s else None,
         })
     if not pairs:
-        raise SystemExit(f"no matching <id>.npz between {teacher_dir} and {student_dir}")
+        raise SystemExit(f"no trace id shared by {teacher} and {student}")
     return pairs
 
 

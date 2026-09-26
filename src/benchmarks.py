@@ -17,8 +17,9 @@ DEV_SIZE = 200
 
 
 def _dataset_path(repo_id: str, local_dir_name: str) -> str:
-    """BENCH_DATA_ROOT/<local_dir_name> on an offline server (see download.txt), else the HF id."""
-    return f"{BENCH_DATA_ROOT}/{local_dir_name}" if BENCH_DATA_ROOT else repo_id
+    """BENCH_DATA_ROOT/<local_dir_name> when that mirror exists (offline server, see download.txt), else the HF id."""
+    local = f"{BENCH_DATA_ROOT}/{local_dir_name}" if BENCH_DATA_ROOT else None
+    return local if local and os.path.isdir(local) else repo_id
 
 
 def _records(rows, question_key: str, answer_key: str) -> list[dict]:
@@ -52,8 +53,8 @@ def load_math500() -> list[dict]:
 def load_dev() -> list[dict]:
     from generate_traces import load_questions
 
-    local = f"{BENCH_DATA_ROOT}/MATH-lighteval" if BENCH_DATA_ROOT else None
-    rows = load_questions("math-train", local, seed=42, skip=0, limit=DEV_SIZE)
+    rows = load_questions("math-train", _dataset_path("DigitalLearningGmbH/MATH-lighteval", "MATH-lighteval"),
+                          seed=42, skip=0, limit=DEV_SIZE)
     return [
         {"id": index, "question": row["question"], "gold": row["gold"], "task_type": "math"}
         for index, row in enumerate(rows)

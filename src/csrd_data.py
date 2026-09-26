@@ -1,15 +1,14 @@
 """Training dataset and collator: SFT fields plus, per sample, the CSRD routing targets.
 
-A record (data_prep.py, student tokenizer) supplies input_ids, the response span and the node
-token spans; --targets-dir holds the teacher's <id>.npz (extract_routing.py) and --causal-dir the
-optional causal targets (causal_targets.py). Node *character* spans stored with the targets must
-equal the record's -- the check that teacher rows and student rows are the same steps.
+A record (data_prep.py --style sgl, student tokenizer) supplies input_ids, the response span and the
+node token spans; the teacher signals come from a signal bank or a targets dir (signal_bank.SignalSource),
+optionally with a causal dir. The node hashes stored with the signals must equal the record's -- the
+check that teacher rows and student rows are the same steps, whatever tokenizer each side used.
 
 The SFT arm uses the same dataset without targets, so both arms read identical samples.
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import json
 import numpy as np
@@ -17,12 +16,13 @@ import torch
 from torch.utils.data import Dataset
 
 from masked_loss import IGNORE_INDEX
+from signal_bank import SignalSource
 
 CSRD_KEY = "csrd"
 
 
 class CSRDDataset(Dataset):
-    def __init__(self, path: str, targets_dir: str | None = None, causal_dir: str | None = None,
+    def __init__(self, path: str, signals: str | None = None, causal_dir: str | None = None,
                  max_seq_len: int | None = None):
         with open(path) as handle:
             self.records = [json.loads(line) for line in handle]
@@ -31,15 +31,14 @@ class CSRDDataset(Dataset):
             self.records = [r for r in self.records if len(r["input_ids"]) <= max_seq_len]
             if len(self.records) < before:
                 print(f"--max-seq-len {max_seq_len}: dropped {before - len(self.records)}/{before} samples")
-        self.targets_dir = Path(targets_dir) if targets_dir else None
-        self.causal_dir = Path(causal_dir) if causal_dir else None
-        if self.targets_dir:
+        self.signals = SignalSource(signals, causal_dir) if signals else None
+        if self.signals is not None:
             # Fail instead of dropping: the SFT arm would keep those records, and the arms must see the same
             # samples (Sec. 6.3 "cùng số token đã thấy"). Rerun extract_routing.py --stage targets (it resumes).
-            missing = [r["id"] for r in self.records if not (self.targets_dir / f"{r['id']}.npz").exists()]
+            available = set(self.signals.ids())
+            missing = [r["id"] for r in self.records if r["id"] not in available]
             if missing:
-                raise FileNotFoundError(
-                    f"no routing target in {self.targets_dir} for {len(missing)} records (e.g. {missing[:3]})")
+                raise FileNotFoundError(f"no teacher signal in {signals} for {len(missing)} records (e.g. {missing[:3]})")
 
     def __len__(self) -> int:
         return len(self.records)
@@ -49,36 +48,33 @@ class CSRDDataset(Dataset):
         return sum(r["response_token_span"][1] - r["response_token_span"][0] + 1 for r in self.records)
 
     def causal_count(self) -> int:
-        if not self.causal_dir:
+        if self.signals is None:
             return 0
-        return sum((self.causal_dir / f"{r['id']}.npz").exists() for r in self.records)
+        return sum(self.signals.has_causal(r["id"]) for r in self.records)
 
     def __getitem__(self, index: int) -> dict:
         record = self.records[index]
         start, end = record["response_token_span"]
         loss_mask = [0] * start + [1] * (end - start) + [1] * (len(record["input_ids"]) - end)
         item = {"input_ids": record["input_ids"], "loss_mask": loss_mask}
-        if self.targets_dir is None:
+        if self.signals is None:
             return item
 
-        char_spans = np.asarray([[n["char_start"], n["char_end"]] for n in record["nodes"]], dtype=np.int64)
-        target = np.load(self.targets_dir / f"{record['id']}.npz")
-        if not np.array_equal(target["char_spans"], char_spans):
-            raise ValueError(f"{record['id']}: teacher target nodes differ from the student record's nodes")
+        target = self.signals.get(record["id"])
+        hashes = np.asarray([n["hash"] for n in record["nodes"]], dtype=np.int64)
+        if not np.array_equal(target["hash"], hashes):
+            raise ValueError(f"{record['id']}: teacher signal nodes differ from the student record's nodes "
+                             "(same canonical content and segmentation on both sides?)")
         csrd = {
             "node_spans": torch.tensor([[n["token_start"], n["token_end"]] for n in record["nodes"]], dtype=torch.long),
-            "P": torch.from_numpy(target["P"]),
-            "Z": torch.from_numpy(target["Z"]),
-            "rows": torch.from_numpy(target["rows"]),
+            "P": torch.from_numpy(np.asarray(target["P"], dtype=np.float32)),
+            "Z": torch.from_numpy(np.asarray(target["Z"], dtype=np.float32)),
+            "rows": torch.from_numpy(np.asarray(target["rows"]).astype(bool)),
             "anchor": torch.tensor(record.get("anchor") or [0] * len(record["nodes"]), dtype=torch.float32),
         }
-        causal_path = self.causal_dir / f"{record['id']}.npz" if self.causal_dir else None
-        if causal_path is not None and causal_path.exists():
-            causal = np.load(causal_path)
-            if not np.array_equal(causal["char_spans"], char_spans):
-                raise ValueError(f"{record['id']}: causal target nodes differ from the record's nodes")
-            csrd["C"] = torch.from_numpy(causal["C"])
-            csrd["J"] = torch.from_numpy(causal["J"])
+        if "C" in target:
+            csrd["C"] = torch.from_numpy(np.asarray(target["C"], dtype=np.float32))
+            csrd["J"] = torch.from_numpy(np.asarray(target["J"], dtype=np.int64))
         item[CSRD_KEY] = csrd
         return item
 

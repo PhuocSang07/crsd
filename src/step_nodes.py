@@ -1,9 +1,10 @@
 """Step nodes on character spans (proposal Sec. 4.1, Appendix B).
 
 A sample's node set is V = {v0 = q, v1..vn = steps of the thinking part, v_{n+1} = a}; every node
-is a half-open character span [beta, eps) of the full text prompt + response. Because nodes live in
-character space, teacher and student always get the same n nodes regardless of tokenizer; each
-model maps them onto its own tokens via offset mapping:
+is a half-open character span [beta, eps) of one model's full text prompt + response, plus the hash
+of its text. Nodes are cut from the trace *content*, so teacher and student always get the same n
+nodes (same hashes) regardless of tokenizer or chat template; each model maps them onto its own
+tokens via offset mapping:
 
     I_M(v_k) = {t : first character of token t in [beta_k, eps_k)}
 
@@ -17,7 +18,7 @@ opening with a reflection keyword) and "chunk3" (three default steps per node).
 import bisect
 import re
 
-from prompting import THINK_CLOSE, THINK_OPEN
+from prompting import text_hash
 
 MIN_STEP_CHARS = 40
 MAX_STEPS = 400
@@ -100,52 +101,32 @@ def split_steps(
 
 
 def build_nodes(
-    prompt: str,
-    response: str,
-    question_span: tuple[int, int],
+    rendered: dict,
     mode: str = "paragraph",
     min_chars: int = MIN_STEP_CHARS,
     max_steps: int = MAX_STEPS,
-    allow_unclosed: bool = False,
-) -> list[dict] | None:
-    """Nodes [q, s1..sn, a] as absolute character spans in prompt + response.
+) -> list[dict]:
+    """Nodes [q, s1..sn, a] of a rendered trace (prompting.render) as absolute character spans in
+    prompt + response, each with the hash of its text.
 
-    The thinking part is the text strictly between <think> and </think>; a is the text after
-    </think> with surrounding whitespace excluded. The markers themselves belong to no node.
-    Returns None for a response without a closed thinking block or with an empty answer --
-    exactly the truncated traces the filter drops anyway -- unless allow_unclosed: then a
-    truncated response (no </think>) yields [q, s1..sn] with no answer node. D3 needs this, since
-    dropping truncated student rollouts (nearly all wrong) would bias the error-prediction test.
+    q is the user content, s1..sn the steps of the thinking text, a the answer text; template tokens and
+    <think> markers belong to no node. A truncated rollout (no answer) has no answer node. Because nodes
+    come from the *content*, two renderings of one trace (teacher and student, any tokenizer or
+    template) produce the same node texts and hashes.
     """
-    open_at = response.find(THINK_OPEN)
-    close_at = response.find(THINK_CLOSE)
-    if open_at < 0:
-        return None
-    if close_at < open_at:
-        if not allow_unclosed:
-            return None
-        close_at = len(response)
+    prompt, response = rendered["prompt"], rendered["response"]
     base = len(prompt)
-    think_start = open_at + len(THINK_OPEN)
-    thinking = response[think_start:close_at]
-    # Leading/trailing whitespace of the thinking block (the "\n" after <think>) stays node-less.
-    lead = len(thinking) - len(thinking.lstrip())
-    body = thinking.strip()
-
-    unclosed = close_at == len(response) and not response.endswith(THINK_CLOSE)
-    answer_raw = "" if unclosed else response[close_at + len(THINK_CLOSE) :]
-    answer_lead = len(answer_raw) - len(answer_raw.lstrip())
-    answer = answer_raw.strip()
-    if not body or (not answer and not unclosed):
-        return None
-
-    nodes = [{"kind": "question", "char_start": question_span[0], "char_end": question_span[1]}]
-    offset = base + think_start + lead
-    for start, end in split_steps(body, mode=mode, min_chars=min_chars, max_steps=max_steps):
-        nodes.append({"kind": "step", "char_start": offset + start, "char_end": offset + end})
-    if not unclosed:
-        answer_start = base + close_at + len(THINK_CLOSE) + answer_lead
-        nodes.append({"kind": "answer", "char_start": answer_start, "char_end": answer_start + len(answer)})
+    text = prompt + response
+    q0, q1 = rendered["question_span"]
+    nodes = [{"kind": "question", "char_start": q0, "char_end": q1}]
+    t0, t1 = rendered["thinking_span"]
+    for start, end in split_steps(response[t0:t1], mode=mode, min_chars=min_chars, max_steps=max_steps):
+        nodes.append({"kind": "step", "char_start": base + t0 + start, "char_end": base + t0 + end})
+    if rendered.get("answer_span"):
+        a0, a1 = rendered["answer_span"]
+        nodes.append({"kind": "answer", "char_start": base + a0, "char_end": base + a1})
+    for node in nodes:
+        node["hash"] = text_hash(text[node["char_start"] : node["char_end"]])
     return nodes
 
 

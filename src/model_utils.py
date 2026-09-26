@@ -9,11 +9,13 @@ QK_MODULES = ("q_proj", "k_proj")
 
 
 def load_causal_lm(model_name: str, adapter: str | None = None, qk_restore: bool = False,
-                   attn_implementation: str = "sdpa", device: str | None = None):
+                   attn_implementation: str = "sdpa", device: str | None = None, device_map: str | None = None):
     """Frozen bf16 (fp32 on CPU) causal LM for teacher-forced reading, adapter merged if given.
 
     qk_restore zeroes the LoRA update of q_proj/k_proj before merging: the model then routes
     with the *pre-training* W_Q, W_K while keeping every other learned update (Zhou et al., 2026).
+    device_map="auto" spreads a teacher too large for one GPU (DeepSeek-R1-Distill-Qwen-32B at 32k
+    tokens) over the visible GPUs; the attention hooks follow each layer's device.
     """
     from transformers import AutoModelForCausalLM
 
@@ -25,6 +27,7 @@ def load_causal_lm(model_name: str, adapter: str | None = None, qk_restore: bool
         model_name,
         dtype=torch.bfloat16 if on_gpu else torch.float32,
         attn_implementation=attn_implementation,
+        device_map=device_map if on_gpu else None,
     )
     if adapter:
         from peft import PeftModel
@@ -37,6 +40,8 @@ def load_causal_lm(model_name: str, adapter: str | None = None, qk_restore: bool
         raise ValueError("--qk-restore needs an --adapter (for full FT restore W_Q/W_K from the base instead)")
     model.config.use_cache = False
     model.eval().requires_grad_(False)
+    if device_map and on_gpu:
+        return model
     return model.to(device or ("cuda" if on_gpu else "cpu"))
 
 

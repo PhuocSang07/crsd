@@ -1,7 +1,8 @@
 #d
 #datasets
---hf-dataset simplescaling/s1K /mnt/local/_data/@PROJECT@/s1K
 --hf-dataset simplescaling/s1K-1.1 /mnt/local/_data/@PROJECT@/s1K-1.1
+--hf-dataset simplescaling/s1K /mnt/local/_data/@PROJECT@/s1K
+--hf-dataset open-r1/OpenR1-Math-220k /mnt/local/_data/@PROJECT@/OpenR1-Math-220k
 --hf-dataset DigitalLearningGmbH/MATH-lighteval /mnt/local/_data/@PROJECT@/MATH-lighteval
 --hf-dataset math-ai/aime24 /mnt/local/_data/@PROJECT@/aime24
 --hf-dataset math-ai/aime25 /mnt/local/_data/@PROJECT@/aime25
@@ -10,6 +11,6 @@
 #models
 --hf Qwen/Qwen3-8B /mnt/local/_models/@PROJECT@/Qwen3-8B
 --hf Qwen/Qwen3-1.7B-Base /mnt/local/_models/@PROJECT@/Qwen3-1.7B-Base
---hf Qwen/Qwen3-4B-Base /mnt/local/_models/@PROJECT@/Qwen3-4B-Base
+--hf deepseek-ai/DeepSeek-R1-Distill-Qwen-32B /mnt/local/_models/@PROJECT@/DeepSeek-R1-Distill-Qwen-32B
 
 (this line and below are ignored)

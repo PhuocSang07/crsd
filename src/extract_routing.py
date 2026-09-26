@@ -47,6 +47,11 @@ def record_char_spans(record: dict) -> np.ndarray:
     return np.asarray([[n["char_start"], n["char_end"]] for n in record["nodes"]], dtype=np.int64)
 
 
+def record_hashes(record: dict) -> np.ndarray:
+    """Node text hashes: how signals are matched to any student's records (prompting.text_hash)."""
+    return np.asarray([n["hash"] for n in record["nodes"]], dtype=np.int64)
+
+
 @torch.no_grad()
 def response_nll(model, hidden: torch.Tensor, record: dict, chunk: int = 2048) -> float:
     """Mean next-token NLL of the response tokens (D3 control variable), chunked over the LM head."""
@@ -82,8 +87,14 @@ class RoutingExtractor:
         """reduce(layer, heads, out) consumes each head chunk's routing dict (R, Z, mean_distance)."""
         input_ids = torch.tensor([record["input_ids"]], device=self.device)
         spans = [(n["token_start"], n["token_end"]) for n in record["nodes"]]
-        key_nodes = torch.tensor(token_node_ids(spans, input_ids.size(1)), device=self.device)
-        far = far_target_mask(len(spans), self.d_min, self.device)
+        key_nodes_cpu = torch.tensor(token_node_ids(spans, input_ids.size(1)))
+        far_cpu = far_target_mask(len(spans), self.d_min)
+        per_device = {}  # a device_map-sharded teacher runs its layers on several GPUs
+
+        def on(device):
+            if device not in per_device:
+                per_device[device] = (key_nodes_cpu.to(device), far_cpu.to(device))
+            return per_device[device]
 
         def make(layer):
             heads = list(range(self.num_heads)) if heads_by_layer is None else heads_by_layer.get(layer)
@@ -93,6 +104,7 @@ class RoutingExtractor:
             def hook(module, query, key, value, attention_mask, **kwargs):
                 scale = kwargs.get("scaling") or module.scaling
                 groups = query.size(1) // key.size(1)
+                key_nodes, far = on(query.device)
                 for start in range(0, len(heads), self.head_chunk):
                     chunk = heads[start : start + self.head_chunk]
                     index = torch.tensor(chunk, device=query.device)
@@ -109,7 +121,7 @@ class RoutingExtractor:
         finally:
             attention_capture.clear_hooks(self.modules)
         self.last_nll = response_nll(self.model, hidden, record) if self.want_nll else None
-        return far
+        return far_cpu
 
 
 def calibrate(extractor: RoutingExtractor, records: list[dict], output: Path, shard: str) -> None:
@@ -124,8 +136,8 @@ def calibrate(extractor: RoutingExtractor, records: list[dict], output: Path, sh
         def reduce(layer, heads, out):
             idx = torch.tensor(heads, device=extractor.device)
             # rows that own queries are exactly the valid rows (|F(i)| >= 2)
-            nu[layer, idx] = vertical_scores(out["R"], out["counts"] > 0, extractor.d_min)
-            md[layer, idx] = out["mean_distance"]
+            nu[layer, idx] = vertical_scores(out["R"], out["counts"] > 0, extractor.d_min).to(extractor.device)
+            md[layer, idx] = out["mean_distance"].to(extractor.device)
 
         extractor.run(record, None, reduce)
         flat = nu.view(L * H, num_nodes)
@@ -141,7 +153,7 @@ def calibrate(extractor: RoutingExtractor, records: list[dict], output: Path, sh
     )
 
 
-def select(output: Path, k_per_band: int, seed: int) -> None:
+def select(output: Path, k_per_band: int, seed: int, expected_traces: int | None = None) -> None:
     from scipy.stats import spearmanr
 
     shards = sorted(glob.glob(str(output / "calib-*.npz")))
@@ -149,6 +161,11 @@ def select(output: Path, k_per_band: int, seed: int) -> None:
         raise SystemExit(f"no calib-*.npz in {output}")
     data = [np.load(path) for path in shards]
     per_mode = {mode: np.concatenate([d[f"scores_{mode}"] for d in data]) for mode in SCORE_MODES}
+    n_traces = per_mode[SCORE_MODES[0]].shape[0]
+    if expected_traces is not None and n_traces != expected_traces:
+        # a failed shard or leftovers from another GPU count would silently shrink/skew D_cal
+        raise SystemExit(f"calibration covers {n_traces} traces, expected {expected_traces}: rerun calibrate "
+                         f"(delete {output}/calib-*.npz)")
     distance = np.concatenate([d["mean_distance"] for d in data]).mean(0)
     num_layers, num_heads = distance.shape
     layers = band_layers(num_layers)
@@ -220,8 +237,8 @@ def extract_targets(extractor: RoutingExtractor, records: list[dict], heads_json
         def reduce(layer, heads, out):
             for index, head in enumerate(heads):
                 b = band_of[(layer, head)]
-                P[b] += out["R"][index] / len(bands[b])
-                Z[b] += out["Z"][index] / len(bands[b])
+                P[b] += out["R"][index].to(P.device) / len(bands[b])
+                Z[b] += out["Z"][index].to(Z.device) / len(bands[b])
                 per_head_md[(layer, head)] = float(out["mean_distance"][index])
                 if save_per_head:
                     per_head_R[(layer, head)] = out["R"][index].half().cpu().numpy()
@@ -232,6 +249,7 @@ def extract_targets(extractor: RoutingExtractor, records: list[dict], heads_json
             "Z": Z.cpu().numpy().astype(np.float32),
             "rows": valid_rows(far).cpu().numpy(),
             "char_spans": record_char_spans(record),
+            "hash": record_hashes(record),
             "heads": np.asarray(order, dtype=np.int64),
             "mean_distance": np.asarray([per_head_md[pair] for pair in order], dtype=np.float32),
         }
@@ -255,9 +273,12 @@ def main() -> None:
     parser.add_argument("--limit", type=int, help="targets: first N records only")
     parser.add_argument("--d-min", type=int, default=4)
     parser.add_argument("--k-per-band", type=int, default=16)
+    parser.add_argument("--expected-traces", type=int, help="select: fail unless the shards cover exactly this many traces")
     parser.add_argument("--query-block", type=int, default=1024)
     parser.add_argument("--head-chunk", type=int, default=8)
     parser.add_argument("--attn-implementation", default="sdpa")
+    parser.add_argument("--device-map", help="'auto' shards a large teacher (e.g. 32B) over the visible GPUs")
+    parser.add_argument("--source-name", help="dataset tag stored in the signal metadata (e.g. s1k11)")
     parser.add_argument("--save-per-head", action="store_true", help="also store per-head R (float16) for D4 by head")
     parser.add_argument("--save-nll", action="store_true", help="also store the response's mean NLL (D3 control)")
     parser.add_argument("--num-shards", type=int, default=1)
@@ -268,12 +289,13 @@ def main() -> None:
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     if args.stage == "select":
-        select(output, args.k_per_band, args.seed)
+        select(output, args.k_per_band, args.seed, args.expected_traces)
         return
     if not (args.model_name and args.data_path):
         parser.error(f"--stage {args.stage} needs --model-name and --data-path")
 
-    model = load_causal_lm(args.model_name, args.adapter, args.qk_restore, args.attn_implementation)
+    model = load_causal_lm(args.model_name, args.adapter, args.qk_restore, args.attn_implementation,
+                           device_map=args.device_map)
     extractor = RoutingExtractor(model, args.d_min, args.query_block, args.head_chunk)
     extractor.want_nll = args.save_nll
     shard = f"shard{args.shard_index}of{args.num_shards}"
@@ -288,9 +310,13 @@ def main() -> None:
             raise ValueError(f"heads.json is for {heads_json['num_layers']} layers, model has {extractor.num_layers}")
         records = load_records(args.data_path, args.limit)[args.shard_index :: args.num_shards]
         extract_targets(extractor, records, heads_json, output, args.save_per_head)
+        style = records[0].get("style") if records else None
         (output / "targets-config.json").write_text(json.dumps(
             {"model": args.model_name, "adapter": args.adapter, "qk_restore": args.qk_restore,
-             "heads_json": args.heads_json, "d_min": args.d_min, "score": heads_json["score"]}, indent=2))
+             "heads_json": args.heads_json, "d_min": args.d_min, "score": heads_json["score"],
+             "num_layers": extractor.num_layers, "num_heads": extractor.num_heads,
+             "bands": heads_json.get("bands"), "band_layers": heads_json.get("band_layers"),
+             "style": style, "source": args.source_name, "data_path": args.data_path}, indent=2))
 
 
 if __name__ == "__main__":

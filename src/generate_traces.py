@@ -9,7 +9,8 @@ Two stages, so the expensive one never has to be redone to change a filtering ru
                        the other seven as RSR candidates -> traces JSONL + retention stats (gate G0)
 
 Correctness: math-verify against the gold answer when one can be read off (a \\boxed{} in the
-reference, or a short bare reference); otherwise an LLM judge (--judge-model, vLLM) compares the
+reference, or a short bare reference); otherwise an LLM judge (--judge-model, vLLM; a non-thinking chat
+model such as Qwen3-8B, which answers in one word -- not R1-Distill, which always thinks first) compares the
 trace's final answer with the reference solution. Without a judge those questions are dropped and
 counted.
 
@@ -28,7 +29,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 from answer_scoring import extract_boxed, math_answers_equal
-from prompting import THINK_CLOSE, render_prompt
+from prompting import THINK_CLOSE, render_prompt, split_response, stop_token_ids
 
 SOURCES = ("s1k", "math-train")
 _BARE_ANSWER_MAX_CHARS = 64
@@ -93,7 +94,9 @@ def generate(args) -> None:
     items = load_questions(args.source, args.dataset_name, args.seed, args.skip, args.limit)
     items = items[args.shard_index :: args.num_shards]
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    prompts = [render_prompt(tokenizer, item["question"], enable_thinking=True) for item in items]
+    # The teacher writes in its own thinking format (Qwen3 thinking mode, or R1-Distill's template, which
+    # opens <think> itself); the user turn is the SGL/P-ALIGN instruction the students are trained with.
+    prompts = [render_prompt(tokenizer, item["question"], "thinking") for item in items]
     llm = LLM(
         model=args.model_name,
         max_model_len=args.max_model_len,
@@ -110,8 +113,11 @@ def generate(args) -> None:
         top_k=args.top_k,
         max_tokens=args.max_tokens,
         seed=args.seed,
+        stop_token_ids=stop_token_ids(tokenizer),
     )
     output = Path(args.output_path)
+    if args.num_shards > 1:  # one file per shard; concatenate them afterwards
+        output = output.with_name(f"{output.name}.shard{args.shard_index}of{args.num_shards}")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w") as handle:
         # Batched so a stop partway through keeps every finished question.
@@ -131,7 +137,8 @@ def generate(args) -> None:
 
 
 def final_answer_text(text: str) -> str:
-    return text.split(THINK_CLOSE, 1)[1].strip() if THINK_CLOSE in text else ""
+    """The text after </think> (teacher generations are always in thinking format)."""
+    return split_response(text)["answer"] if THINK_CLOSE in text else ""
 
 
 def judge_rows(rows: list[dict], judge_model: str, args) -> dict[tuple[str, int], bool]:

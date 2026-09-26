@@ -1,98 +1,84 @@
 # CSRD — Cần làm gì tiếp theo
 
-Tài liệu này là lộ trình từ trạng thái hiện tại (code + test xong, chưa chạy GPU) đến bảng kết quả chính.
-Mọi lệnh chạy từ thư mục gốc repo. Chi tiết từng module: `README.md`.
+Lộ trình từ trạng thái hiện tại (code và test xong, chưa chạy GPU) đến bảng kết quả. Mọi lệnh chạy từ thư mục gốc repo;
+tham số đầu của mọi script là `TRACK`. Chi tiết thiết kế: `README.md`.
 
-## 0. Trạng thái hiện tại (26/09/2026)
+## 0. Trạng thái (26/09/2026)
 
 | Hạng mục | Trạng thái |
 |---|---|
-| Pipeline pilot 8B → 1.7B (sinh trace → nút → target teacher → train SFT/CSRD → chẩn đoán → eval → error injection → gate) | Code xong |
-| Unit test CPU (Bổ đề 1, gradcheck, blockwise vs attention đầy đủ, cô lập gradient CSRD-QK, pass@k…) | 38/38 pass |
-| Smoke test toàn pipeline trên model Qwen3 ngẫu nhiên tí hon | Pass |
-| DDP 2 tiến trình (CSRD và CSRD-QK) | Pass |
-| Chạy nguyên văn các shell script targets / train (sft, csrd, csrd-qk) / diag trên model tí hon | Pass |
-| Review độc lập đối chiếu proposal (3 lỗi lớn + 8 lỗi nhỏ: D6 thiếu pass@1, metric error injection có thể "chép" đáp án, nền nhiễu của target nhân quả, …) | Đã sửa hết |
-| Sanity check trọng số thật Qwen3-0.6B → 0.6B-Base (CPU) | Chạy thông; có receiver head thật |
-| Chạy trên GPU với Qwen3-8B → Qwen3-1.7B-Base | **Chưa** |
+| Hai hướng × hai teacher: `read-q8b-1.7b`, `read-d32b-q8b` (chính), `gen-q8b-1.7b`, `gen-d32b-q8b` (ablation) | Code xong |
+| Text student trùng từng byte/token với định dạng SGL của baseline (kiểm trên 30 mẫu s1K-1.1, cả Qwen3-8B và 1.7B-Base) | Đã kiểm |
+| Hash nút khớp giữa student (SGL) và teacher Qwen3-8B / R1-Distill-32B (template riêng) trên 40 mẫu thật | Đã kiểm |
+| File tín hiệu dùng lại được (`signals/*.safetensors`), dataset đọc từ file hoặc thư mục cho kết quả giống hệt | Đã kiểm |
+| Unit test CPU | 42/42 pass |
+| Smoke test toàn pipeline, teacher khác tokenizer (Qwen2 + tokenizer R1 → Qwen3) | Pass |
+| Các shell script chạy nguyên văn trên model tí hon (data, tín hiệu teacher, train, chẩn đoán; DDP 2 tiến trình) | Pass |
+| Chạy GPU thật | **Chưa** |
 
-## 1. Chuẩn bị máy GPU (nửa ngày)
+## 1. Chuẩn bị máy GPU
 
-1. Clone repo lên node GPU (8×H100 như §7; tối thiểu 1 GPU 80 GB vẫn chạy được, chỉ chậm hơn).
-2. Tải model/dataset theo `download.txt`: Qwen3-8B, Qwen3-1.7B-Base, s1K, MATH-lighteval, AIME24/25, MATH-500, AMC.
-3. `bash scripts/setup.sh`, sau đó `python -m pytest tests -q` (phải ra 38 passed).
-   - Trên Lightning Studio: làm như `SpectralGuidedLearning/scripts/lightning_run.sh` (cài vào Python hệ thống, tạo
-     `$PROJECT_ENV/bin/activate` rỗng, symlink `$PROJECT_ENV/bin/python`), đặt `LOCAL_MODELS_ROOT`, `BENCH_DATA_ROOT=""`,
-     và `DATASET_NAME=<id HF>` cho hai script sinh trace.
+1. Clone `https://github.com/PhuocSang07/crsd` lên node GPU (8×H100 80 GB; teacher 32B cần 2 GPU cho mỗi tiến trình đọc).
+2. Tải theo `download.txt`: Qwen3-8B, Qwen3-1.7B-Base, DeepSeek-R1-Distill-Qwen-32B; s1K-1.1, s1K, OpenR1-Math-220k,
+   MATH-lighteval, AIME24/25, MATH-500, AMC. (Không có bản mirror thì script tự lấy từ HF Hub.)
+3. `bash scripts/setup.sh`, rồi `python -m pytest tests -q` (phải ra 42 passed).
+   Trên Lightning Studio: cài vào Python hệ thống như `SpectralGuidedLearning/scripts/lightning_run.sh`, tạo
+   `$PROJECT_ENV/bin/activate` rỗng và symlink `$PROJECT_ENV/bin/python`, đặt `LOCAL_MODELS_ROOT`, `BENCH_DATA_ROOT=""`.
 4. Đặt `GPUS="0 1 2 3 4 5 6 7"`.
 
-## 2. Chạy thử nhỏ (1–2 giờ)
+## 2. Hướng chính — teacher đọc lại s1K-1.1 (`project_commands_read.sh`)
 
-```bash
-LIMIT=20 bash scripts/gen/gen_s1k-q8b.sh
-cat data/q8b/s1k-traces.jsonl.stats.json          # response có <think>…</think>? tỉ lệ đúng hợp lý?
-rm -rf data/q8b/s1k-raw* data/q8b/s1k-traces.jsonl*   # bắt buộc, nếu không lần chạy thật sẽ bỏ qua các shard cũ
-```
+Làm `read-d32b-q8b` trước: student Qwen3-8B trùng với checkpoint P-ALIGN / SSFT bạn đã có, nên so sánh được ngay.
 
-## 3. Pilot tuần 1 — dữ liệu và chẩn đoán
-
-| # | Lệnh | Kiểm tra / gate |
+| # | Lệnh | Kiểm tra |
 |---|---|---|
-| 1 | `bash scripts/gen/gen_s1k-q8b.sh` | **G0**: `kept_questions ≥ 600`. Nếu không đạt: bổ sung đề độ khó vừa (§6.2) |
-| 2 | `bash scripts/gen/gen_heldout-q8b.sh` | khoảng 300 trace held-out |
-| 3 | `bash scripts/data/data_q8b-1.7b.sh` | phân bố số bước; bin khoảng cách ≥ 64 phải có cặp; `decontamination.json` sạch |
-| 4 | `bash scripts/targets/targets_qwen3-8b.sh` | `data/q8b/routing-teacher/selection-summary.json`: split-half (tham chiếu r ≈ .67) và độ trùng giữa hai cách chọn head; `WARNING … KL before the suppressed node` trong log nhân quả phải không xuất hiện |
-| 5 | `bash scripts/train/train_q8b-1.7b.sh sft 42` | loss giảm, không OOM; `peak_memory_gb` trong `run-summary.json` |
-| 6 | `bash scripts/diag/diag_q8b-1.7b.sh base base` | mốc trước huấn luyện |
-| 7 | `DEV_ROLLOUTS=1 N_SAMPLES_MAP=aime24=8,aime25=8,amc12=8 bash scripts/eval/eval_q8b-1.7b.sh checkpoints/sft-q8b-1.7b-s42 sft-q8b-1.7b-s42` | pass@1 của SFT; truncation rate |
-| 8 | `bash scripts/diag/diag_q8b-1.7b.sh checkpoints/sft-q8b-1.7b-s42 sft-q8b-1.7b-s42` | **G1, G2, G4** (`results/diag-…/diagnostics.md`), **G3** (`…-d3/`), RG sau QK-Restore (`…-qkrestore/`) |
-| 9 | `python src/qk_restore.py --adapter checkpoints/sft-q8b-1.7b-s42 --output-dir checkpoints/sft-qkrestore-q8b-1.7b-s42`, rồi eval như bước 7 | **D6**: pass@1 của SFT gần như không đổi sau QK-Restore? |
+| 1 | `bash scripts/data/canonical.sh read-d32b-q8b` | 1000 trace s1K-1.1; 300 trace held-out OpenR1 |
+| 2 | `bash scripts/data/records.sh read-d32b-q8b` | log `records-*`: không có `content_not_verbatim` / `empty_node` đáng kể; bin khoảng cách ≥ 64 có cặp |
+| 3 | `bash scripts/targets/teacher_signals.sh read-d32b-q8b` | `data/teacher/d32b-s1k11/routing/selection-summary.json` (split-half, r ≈ .67 là mốc tham chiếu); không có `WARNING … KL before the suppressed node`; tạo ra `signals/d32b-s1k11-dmin4-excess_bg.safetensors` |
+| 4 | `bash scripts/train/train.sh read-d32b-q8b sft 42` | loss giảm, `peak_memory_gb` trong `run-summary.json` |
+| 5 | `bash scripts/eval/eval.sh read-d32b-q8b <ckpt P-ALIGN> palign-read-d32b-q8b-s42` (tương tự cho SSFT, SGL) | eval lại baseline có sẵn bằng cùng grader, cả hai protocol; số `palign` nên gần số bạn đã có |
+| 6 | `bash scripts/diag/diag.sh read-d32b-q8b base base-read-d32b-q8b` rồi `… checkpoints/sft-read-d32b-q8b-s42 sft-read-d32b-q8b-s42` (sau eval với `DEV_ROLLOUTS=1`) | **G1, G2, G4** (`results/diag-…/diagnostics.md`), **G3** (`…-d3`), D6 (`…-qkrestore`) |
+| 7 | `LAMBDA=0.3 bash scripts/train/train.sh read-d32b-q8b csrd 42` (thêm λ = 1, seed 43/44) | `logs/train-csrd-*.log`: `loss_route` giảm, `csrd_zS_b*` tiến về `csrd_zT_b*` |
+| 8 | eval, error injection, `compare_results.py --track read-d32b-q8b`, `pilot_report.py --track read-d32b-q8b` | **G5, G6**, kiểm định hoán vị + Holm so với SFT và với baseline |
 
-**Quyết định sau tuần 1** (§7):
-- G1 fail → dừng CSRD, chuyển sang hướng dự phòng B (bài phân tích: routing gap không xuất hiện ở Transformer thuần softmax).
-- G1 đạt, G4 fail → `bash scripts/targets/causal_heads_qwen3-8b.sh`, tuần 2 dùng arm `csrd-c`.
-- G1 đạt → sang tuần 2.
+Cách đơn giản nhất: `BASELINES_read_d32b_q8b="palign:/path/palign ssft:/path/ssft sgl:/path/sgl" TRACKS=read-d32b-q8b bash project_commands_read.sh`.
+Sau đó chạy `read-q8b-1.7b` (cặp pilot của proposal). Track này **chưa có baseline** trên Qwen3-1.7B-Base: train
+SGL / P-ALIGN / SSFT bằng code gốc của chúng với cùng dữ liệu và cấu hình, rồi eval bằng `scripts/eval/eval.sh read-q8b-1.7b …`.
 
-## 4. Pilot tuần 2 — can thiệp
+Theo dõi khi train CSRD:
+- `grad_route_ratio` luôn > 1 → loss định tuyến lấn át CE: thử λ = 0.1.
+- `grad_cos_ce_route` âm kéo dài → chạy arm `csrd-qk`.
 
-Chạy phần "WEEK 2" trong `project_commands_pilot.sh`: SFT và CSRD với λ ∈ {0.3, 1} × seed {42, 43, 44}, eval
-(n = 8 cho AIME/AMC, 4 cho MATH500), B0 zero-shot và few-shot, error injection khoảng 100 case, chẩn đoán cho CSRD, rồi:
+**Quyết định** (§7): G1 fail → dừng CSRD, chuyển hướng dự phòng B; G1 đạt, G4 fail → `scripts/targets/causal_heads.sh TRACK`
+rồi dùng arm `csrd-c`; G1 ∧ G3 ∧ G5 → chương trình đầy đủ.
 
-```bash
-python src/compare_results.py --baseline sft-q8b-1.7b   # bảng mean ± std, kiểm định hoán vị theo cặp + Holm, G5
-python src/pilot_report.py                              # G0–G6 và nhánh quyết định
-```
+## 3. Hướng ablation — teacher tự sinh dữ liệu (`project_commands_gen.sh`)
 
-Theo dõi trong `logs/train-csrd-*.log`:
-- `grad_route_ratio` luôn > 1 → loss định tuyến lấn át CE: thêm λ = 0.1.
-- `grad_cos_ce_route` âm kéo dài → chạy arm `csrd-qk` (§4.7).
-- `csrd_zS_b*` tiến dần về `csrd_zT_b*` → L_mass đang có tác dụng.
+`bash scripts/gen/gen_traces.sh gen-q8b-1.7b` (và `gen-d32b-q8b`; chạy thử `LIMIT=20` trước, rồi xoá `data/gen/<teacher>`),
+sau đó các pha giống mục 2. Gate **G0**: `data/gen/<teacher>/s1k-traces.jsonl.stats.json` phải có ≥ 600 câu. Câu hỏi của
+hướng này: tín hiệu từ đúng tác giả trace có tốt hơn tín hiệu từ người đọc lại không (so với mục 2, cùng student).
+Dữ liệu khác của baseline, nên muốn có baseline ở hướng này thì phải train lại chúng trên dữ liệu sinh.
 
-**Quyết định sau tuần 2:** G1 ∧ G3 ∧ G5 → chương trình đầy đủ (mục 5); G1 đạt nhưng G3 và G5 fail → hướng dự phòng A (§11.2).
+## 4. Tái sử dụng tín hiệu 32B cho student khác
 
-## 5. Sau pilot (nếu go) — theo lịch T2–T4 (Bảng 9)
+`signals/d32b-s1k11-dmin4-excess_bg.safetensors` không phụ thuộc student. Với một student mới (ví dụ Qwen3-1.7B-Base, hay Llama):
+1. `python src/data_prep.py --canonical data/canonical/s1k11.jsonl --tokenizer <student> --style sgl --output-path <records>`
+2. `python src/train_sft.py … --data-path <records> --signals signals/d32b-s1k11-dmin4-excess_bg.safetensors --csrd-lambda 0.3`
 
-1. **Baseline (T2)**, cùng dữ liệu s1K-Q8B và cùng cấu hình LoRA:
-   - B2 token-level KL: lưu offline logit top-k của Qwen3-8B (cùng tokenizer).
-   - B3 Segment Selective SFT: tính Integrated Gradients cho khoảng 1k trace (mã gốc SiyuanWangw/SegmentSelectiveSFT).
-   - B4 SGL: tái cài đặt, có thể dùng lại `SpectralGuidedLearning/` (ghi rõ là bản tái cài đặt).
-   - B5 P-ALIGN (NEUIR/P-ALIGN), B6 RSR (trường `candidates` đã lưu 7 trace ứng viên mỗi câu),
-     B7 MoLSAKI (dùng lại pipeline trích attention của CSRD).
-2. **Bảng chính (T3)**: thêm track Qwen3-4B-Base (sao chép `*_q8b-1.7b.sh` thành `*_q8b-4b.sh`, đổi `MODEL_NAME`),
-   3 seed, n = 16 cho AIME/AMC.
-3. **Ablation**: A1–A9 và A12–A15 đã có cờ/arm; còn thiếu A5 (trọng số head học được), A10 (RKD/CKA), A11 (kết hợp với
-   baseline). A9 cần nối `SEGMENT_MODE` vào script targets và train.
-4. **Mở rộng (T4)**: teacher Qwen3-32B → 4B-Base, full fine-tuning 4B (lr 1e-5), biến thể trace R1
-   (`data_prep.py --source s1k11-r1`, A15).
-5. **Phân tích hành vi (§6.7)** chưa có code: anchor deletion, phân loại phản tư xác nhận/sửa đổi, tương quan độ dài
-   phản hồi với độ khó; LLM-judge theo rubric cho phát hiện lỗi trong error injection; tiêu chí thứ hai của G3 (gap cục bộ
-   ngay trước lỗi đầu tiên, cần gán nhãn bước lỗi).
-6. **Trước khi nộp** (Phụ lục E): xác nhận phiên bản AMC12 của P-ALIGN, giấy phép s1K và Qwen3, quét lại công trình
-   liên quan, kiểm tra tay 300 nhãn câu neo nếu dùng `LABELER=llm` (báo cáo accuracy và Cohen's κ).
+Không cần chạy lại teacher, miễn giữ nguyên cách phân đoạn (`paragraph`, 40 ký tự, ≤ 400 bước); dataset sẽ báo lỗi ngay nếu hash nút không khớp.
+Thêm một track mới vào `scripts/common.sh` (ví dụ `read-d32b-1.7b`) là đủ để dùng toàn bộ script.
 
-## 6. Gửi lại để phân tích sau tuần 1
+## 5. Sau pilot (nếu go) — theo Bảng 9
 
-- `data/q8b/s1k-traces.jsonl.stats.json`
-- `logs/select-heads-q8b.log`
-- `results/diag-sft-q8b-1.7b-s42/diagnostics.md` và `…-d3/diagnostics.json`
-- 20–30 dòng cuối của `logs/train-sft-q8b-1.7b-s42.log`
+1. Bảng chính: 3 seed, n = 16 (bỏ `N_SAMPLES_MAP`), λ chọn trên dev; baseline B2 (token-level KL), B6 (RSR), B7 (MoLSAKI).
+2. Ablation A1–A9, A12–A15 đã có arm/cờ (`scripts/train/train.sh` liệt kê); còn thiếu A5 (trọng số head học được), A10, A11.
+3. Full fine-tuning; phân tích hành vi §6.7 còn lại; LLM-judge cho phát hiện lỗi; tiêu chí thứ hai của G3.
+4. Trước khi nộp (Phụ lục E): phiên bản AMC12 của P-ALIGN (83 bài, `AI-MO/aimo-validation-amc`), giấy phép s1K / OpenR1 / Qwen3 /
+   DeepSeek, quét lại công trình liên quan, kiểm tra tay 300 nhãn câu neo nếu dùng `LABELER=llm`.
+
+## 6. Gửi lại để phân tích sau bước 6 của mục 2
+
+- `data/teacher/d32b-s1k11/routing/selection-summary.json`
+- `results/diag-sft-read-d32b-q8b-s42/diagnostics.md` và `…-d3/diagnostics.json`
+- `results-palign/*/summary.json` của baseline eval lại (để đối chiếu với số bạn đã có)
+- 20–30 dòng cuối của `logs/train-sft-read-d32b-q8b-s42.log`

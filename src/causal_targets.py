@@ -22,17 +22,17 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 import attention_capture
-from extract_routing import load_records, record_char_spans
+from extract_routing import load_records, record_char_spans, record_hashes
 from model_utils import load_causal_lm
 from receiver_heads import vertical_scores
+from signal_bank import SignalSource
 from step_nodes import token_node_ids
 
 
-def choose_targets(target_npz: Path, top_j: int, d_min: int) -> np.ndarray:
+def choose_targets(data: dict, top_j: int, d_min: int) -> np.ndarray:
     """Top-|J| nodes by vertical score of the band-averaged teacher routing (answer node excluded)."""
-    data = np.load(target_npz)
     P = torch.from_numpy(data["P"]).mean(0, keepdim=True)
-    nu = vertical_scores(P, torch.from_numpy(data["rows"]), d_min)[0].numpy()
+    nu = vertical_scores(P, torch.from_numpy(data["rows"].astype(bool)), d_min)[0].numpy()
     nu[-1] = np.nan  # nothing reads the answer node back
     order = [j for j in np.argsort(-np.nan_to_num(nu, nan=-np.inf)) if np.isfinite(nu[j])]
     return np.asarray(sorted(order[:top_j]), dtype=np.int64)
@@ -50,9 +50,9 @@ def token_kl(model, clean: torch.Tensor, perturbed: torch.Tensor, positions: tor
     out = []
     for start in range(0, positions.numel(), chunk):
         pos = positions[start : start + chunk]
-        log_p = F.log_softmax(head(clean[pos]).float(), dim=-1)
-        log_q = F.log_softmax(head(perturbed[pos]).float(), dim=-1)
-        out.append((log_p.exp() * (log_p - log_q)).sum(-1))
+        log_p = F.log_softmax(head(clean[pos].to(head.weight.device)).float(), dim=-1)
+        log_q = F.log_softmax(head(perturbed[pos].to(head.weight.device)).float(), dim=-1)
+        out.append((log_p.exp() * (log_p - log_q)).sum(-1).to(clean.device))
     return torch.cat(out) if out else clean.new_zeros(0)
 
 
@@ -69,13 +69,13 @@ def causal_matrix(model, record: dict, targets: np.ndarray, query_block: int) ->
     empty block, so clean and suppressed runs differ only by the suppression (the stock SDPA/flash kernel
     would add a bf16 kernel-mismatch KL to every position). `floor` is the mean KL over positions before
     node j -- which suppression cannot affect -- and must be ~0."""
-    device = next(model.parameters()).device
-    input_ids = torch.tensor([record["input_ids"]], device=device)
+    input_ids = torch.tensor([record["input_ids"]], device=next(model.parameters()).device)
     spans = [(n["token_start"], n["token_end"]) for n in record["nodes"]]
     num_nodes, length = len(spans), input_ids.size(1)
-    node_of = torch.tensor(token_node_ids(spans, length), device=device)
     modules = attention_capture.attention_modules(model)
     clean = hidden_with_suppression(model, modules, input_ids, 0, 0, query_block)
+    device = clean.device  # the last layer's device when the teacher is sharded (device_map)
+    node_of = torch.tensor(token_node_ids(spans, length), device=device)
 
     C = np.full((num_nodes, num_nodes), np.nan, dtype=np.float32)
     floor = np.zeros(len(targets), dtype=np.float32)
@@ -109,6 +109,7 @@ def main() -> None:
     parser.add_argument("--d-min", type=int, default=4)
     parser.add_argument("--query-block", type=int, default=2048)
     parser.add_argument("--attn-implementation", default="sdpa")
+    parser.add_argument("--device-map", help="'auto' shards a large teacher over the visible GPUs")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
@@ -122,17 +123,18 @@ def main() -> None:
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    model = load_causal_lm(args.model_name, attn_implementation=args.attn_implementation)
+    model = load_causal_lm(args.model_name, attn_implementation=args.attn_implementation, device_map=args.device_map)
+    signals = SignalSource(args.targets_dir)
     for record in tqdm(records, desc="causal", unit="trace"):
         path = output / f"{record['id']}.npz"
-        target_npz = Path(args.targets_dir) / f"{record['id']}.npz"
-        if path.exists() or not target_npz.exists():
+        if path.exists() or record["id"] not in signals:
             continue
-        targets = choose_targets(target_npz, args.top_j, args.d_min)
+        targets = choose_targets(signals.get(record["id"]), args.top_j, args.d_min)
         C, floor = causal_matrix(model, record, targets, args.query_block)
         if floor.max() > 1e-4:
             print(f"WARNING {record['id']}: KL before the suppressed node is {floor.max():.2e} (should be ~0)")
-        np.savez_compressed(path, C=C, J=targets, floor=floor, char_spans=record_char_spans(record))
+        np.savez_compressed(path, C=C, J=targets, floor=floor, char_spans=record_char_spans(record),
+                            hash=record_hashes(record))
     (output / "causal-config.json").write_text(json.dumps(vars(args), indent=2))
 
 

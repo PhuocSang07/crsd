@@ -101,7 +101,10 @@ def build_training_arguments(config: dict) -> TrainingArguments:
         per_device_train_batch_size=config["per_device_batch_size"],
         gradient_accumulation_steps=config["gradient_accumulation_steps"],
         learning_rate=config["learning_rate"],
-        lr_scheduler_type="cosine",
+        # SGL's schedule: cosine down to min_learning_rate. min_lr_rate (a ratio), not min_lr: the latter
+        # reads optimizer.defaults["lr"], which DeepSpeed's wrapped ZeRO optimizer doesn't expose.
+        lr_scheduler_type="cosine_with_min_lr",
+        lr_scheduler_kwargs={"min_lr_rate": config["min_learning_rate"] / config["learning_rate"]},
         warmup_ratio=config["warmup_ratio"],
         weight_decay=config.get("weight_decay", 0.0),
         bf16=on_gpu,
@@ -151,6 +154,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--min-learning-rate", type=float, help="cosine floor (SGL: 1e-5)")
     parser.add_argument("--warmup-ratio", type=float)
     parser.add_argument("--per-device-batch-size", type=int)
     parser.add_argument("--gradient-accumulation-steps", type=int)
@@ -166,15 +170,16 @@ def main() -> None:
     parser.add_argument("--save-steps", type=int)
     parser.add_argument("--save-total-limit", type=int)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction)
-    # LoRA (Table 3: all-linear, r = alpha = 64, dropout 0)
+    # LoRA (defaults = the baselines' config in SpectralGuidedLearning: all-linear, r = alpha = 16, dropout 0.05)
     parser.add_argument("--lora-r", type=int)
     parser.add_argument("--lora-alpha", type=int)
     parser.add_argument("--lora-dropout", type=float)
     parser.add_argument("--lora-target-modules")
     # CSRD
     parser.add_argument("--csrd-lambda", type=float, help="lambda_r (0/unset = plain SFT)")
-    parser.add_argument("--targets-dir", help="teacher routing targets (extract_routing.py --stage targets)")
-    parser.add_argument("--causal-dir", help="teacher causal targets (causal_targets.py), optional")
+    parser.add_argument("--signals", help="teacher signals: a packed bank (.safetensors, signal_bank.py) or a "
+                        "targets dir (extract_routing.py --stage targets)")
+    parser.add_argument("--causal-dir", help="causal targets dir (causal_targets.py), when --signals is a targets dir")
     parser.add_argument("--csrd-mass-ratio", type=float, help="lambda_m / lambda_r (default 0.1; 0 = A7)")
     parser.add_argument("--csrd-causal-ratio", type=float, help="lambda_c / lambda_r (default 1.0)")
     parser.add_argument("--csrd-route-ratio", type=float, help="L_route weight / lambda_r (default 1.0; 0 = A3 causal only)")
@@ -197,9 +202,9 @@ def main() -> None:
     config.update({key: value for key, value in vars(args).items()
                    if value is not None and key not in ("config", "smoke")})
     defaults = {
-        "epochs": 3, "learning_rate": 1e-4, "warmup_ratio": 0.05, "per_device_batch_size": 1,
-        "gradient_accumulation_steps": 16, "attn_implementation": "sdpa", "seed": 42, "ce_chunk": 4096,
-        "lora_r": 64, "lora_alpha": 64, "lora_dropout": 0.0, "lora_target_modules": ALL_LINEAR,
+        "epochs": 3, "learning_rate": 5e-5, "min_learning_rate": 1e-5, "warmup_ratio": 0.1, "per_device_batch_size": 1,
+        "gradient_accumulation_steps": 32, "attn_implementation": "sdpa", "seed": 42, "ce_chunk": 4096,
+        "lora_r": 16, "lora_alpha": 16, "lora_dropout": 0.05, "lora_target_modules": ALL_LINEAR,
         "csrd_lambda": 0.0, "csrd_mass_ratio": 0.1, "csrd_causal_ratio": 1.0, "csrd_route_ratio": 1.0,
         "csrd_bands": "0,1", "csrd_d_min": 4,
         "csrd_queries": 8, "csrd_k_student": 16, "csrd_head_mode": "receiver", "csrd_score": "excess_bg",
@@ -212,19 +217,23 @@ def main() -> None:
     if missing:
         parser.error(f"missing required settings: {missing}")
     use_csrd = config["csrd_lambda"] > 0
-    if use_csrd and not config.get("targets_dir"):
-        parser.error("--csrd-lambda > 0 needs --targets-dir")
+    if use_csrd and not config.get("signals"):
+        parser.error("--csrd-lambda > 0 needs --signals")
     if use_csrd:
-        targets_config = Path(config["targets_dir"]) / "targets-config.json"
-        if targets_config.exists() and json.loads(targets_config.read_text())["d_min"] != config["csrd_d_min"]:
-            parser.error(f"--csrd-d-min {config['csrd_d_min']} differs from the targets' d_min ({targets_config})")
+        from signal_bank import SignalSource
+
+        info = SignalSource(config["signals"]).info
+        if info.get("d_min") is not None and info["d_min"] != config["csrd_d_min"]:
+            parser.error(f"--csrd-d-min {config['csrd_d_min']} differs from the signals' d_min ({info['d_min']})")
+        print(f"teacher signals: {info.get('model')} score={info.get('score')} style={info.get('style')} "
+              f"source={info.get('source')} d_min={info.get('d_min')}")
 
     set_training_seed(config["seed"])
     attention_capture.install()
     tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
     dataset = CSRDDataset(
         config["data_path"],
-        targets_dir=config.get("targets_dir") if use_csrd else None,
+        signals=config.get("signals") if use_csrd else None,
         causal_dir=config.get("causal_dir") if use_csrd else None,
         max_seq_len=config.get("max_seq_len"),
     )

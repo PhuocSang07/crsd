@@ -25,6 +25,7 @@ dependencies = [
     "tqdm",
     "safetensors",
     "math-verify==0.8.0",
+    "pylatexenc",          # oat_math_grader's latex->text branch (else palign_grader silently runs math_verify only)
     "pytest",
 ]
 

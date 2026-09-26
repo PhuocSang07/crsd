@@ -82,7 +82,7 @@ def csrd_data(tmp_path):
             nodes, cursor = [], 3
             for k, length in enumerate(lengths):
                 nodes.append({"kind": "step", "char_start": cursor * 10, "char_end": (cursor + length) * 10,
-                              "token_start": cursor, "token_end": cursor + length})
+                              "token_start": cursor, "token_end": cursor + length, "hash": 1000 * index + k})
                 cursor += length
             input_ids = rng.integers(0, 64, size=cursor + 1).tolist()
             handle.write(json.dumps({"id": f"r{index}", "input_ids": input_ids, "response_token_span": [8, cursor],
@@ -93,7 +93,8 @@ def csrd_data(tmp_path):
             P = P / np.maximum(P.sum(-1, keepdims=True), 1e-12)
             np.savez(targets / f"r{index}.npz", P=P.astype(np.float32), Z=rng.random((2, N)).astype(np.float32),
                      rows=valid_rows(torch.from_numpy(far)).numpy(),
-                     char_spans=np.asarray([[n["char_start"], n["char_end"]] for n in nodes]))
+                     char_spans=np.asarray([[n["char_start"], n["char_end"]] for n in nodes]),
+                     hash=np.asarray([n["hash"] for n in nodes], dtype=np.int64))
     return records, targets
 
 
@@ -104,7 +105,7 @@ def _trainer(tmp_path, records, targets, qk_rank=0, lam=1.0, checkpointing=False
     args = TrainingArguments(output_dir=str(tmp_path / "out"), per_device_train_batch_size=1, max_steps=10,
                              use_cpu=True, report_to=[], gradient_checkpointing=checkpointing,
                              gradient_checkpointing_kwargs={"use_reentrant": False}, remove_unused_columns=False)
-    trainer = CSRDTrainer(model=model, args=args, train_dataset=CSRDDataset(str(records), str(targets)),
+    trainer = CSRDTrainer(model=model, args=args, train_dataset=CSRDDataset(str(records), signals=str(targets)),
                           data_collator=CSRDCollator(pad_token_id=0), csrd_lambda=lam, csrd_d_min=2, csrd_queries=3,
                           csrd_head_mode="band", csrd_warmup_frac=0.0, csrd_ramp_frac=0.0, csrd_grad_log_interval=0,
                           csrd_qk_adapter="qk" if qk_rank else None)
@@ -157,3 +158,22 @@ def test_csrd_qk_isolates_gradients(tmp_path, csrd_data):
     assert any(g.abs().max() > 0 for g in qk_route.values())  # routing loss does
     for name in main_ce_only:  # main adapter identical with or without the routing loss
         assert torch.allclose(main_ce_only[name], main_route[name], atol=1e-7), name
+
+
+def test_signal_bank_roundtrip_and_hash_check(tmp_path, csrd_data):
+    """A packed bank serves the dataset exactly like the targets dir; foreign nodes are rejected."""
+    from signal_bank import SignalSource, pack
+
+    records, targets = csrd_data
+    bank = tmp_path / "bank.safetensors"
+    pack(str(targets), None, str(bank))
+    from_dir, from_bank = CSRDDataset(str(records), signals=str(targets)), CSRDDataset(str(records), signals=str(bank))
+    for a, b in zip(from_dir[0]["csrd"].values(), from_bank[0]["csrd"].values()):
+        assert torch.equal(a, b)
+    assert SignalSource(str(bank)).ids() == ["r0", "r1"]
+    tampered = tmp_path / "tampered.jsonl"
+    rows = [json.loads(line) for line in records.open()]
+    rows[0]["nodes"][3]["hash"] += 1
+    tampered.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    with pytest.raises(ValueError, match="nodes differ"):
+        CSRDDataset(str(tampered), signals=str(bank))[0]

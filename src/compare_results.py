@@ -1,6 +1,6 @@
 """Merge per-run eval summaries into the comparison table (mean +- std over seeds) and check G5.
 
-    python src/compare_results.py [--results-dir results] [--baseline sft-q8b-1.7b]
+    python src/compare_results.py --results-dir results-proposal --track read-d32b-q8b
 
 Tags are "<arm>-<track>[-s<seed>]"; runs differing only in the seed suffix are pooled. Every arm
 is compared with --baseline (same track): per-benchmark deltas, gate G5 (mean pass@1 +1.5 points
@@ -48,7 +48,9 @@ def per_problem_pass1(results_dir: Path, arm: str, benchmarks: list[str]) -> dic
     return {key: float(np.mean(v)) for key, v in values.items()}
 
 
-def significance(results_dir: Path, runs, baseline: str) -> dict[str, dict]:
+def significance(results_dir: Path, runs, baseline: str, family: str) -> dict[str, dict]:
+    """Paired tests of every arm vs the baseline; Holm correction over the arms matching `family` only
+    (the CSRD interventions), so reference rows (B0, QK-Restore, other baselines) don't inflate it."""
     benchmarks = [b for b in BENCHMARK_ORDER if any(b in r for r in runs.values())]
     base = per_problem_pass1(results_dir, baseline, benchmarks)
     raw_p, deltas = {}, {}
@@ -62,9 +64,10 @@ def significance(results_dir: Path, runs, baseline: str) -> dict[str, dict]:
         a, b = [other[k] for k in shared], [base[k] for k in shared]
         raw_p[arm] = paired_permutation_test(a, b)
         deltas[arm] = (float(np.mean(a) - np.mean(b)) * 100, len(shared))
-    adjusted = holm_bonferroni(raw_p) if raw_p else {}
+    in_family = {arm: p for arm, p in raw_p.items() if re.search(family, arm)}
+    adjusted = holm_bonferroni(in_family) if in_family else {}
     return {arm: {"delta_pp_problem_mean": deltas[arm][0], "problems": deltas[arm][1],
-                  "p": raw_p[arm], "p_holm": adjusted[arm]} for arm in raw_p}
+                  "p": raw_p[arm], "p_holm": adjusted.get(arm, float("nan"))} for arm in raw_p}
 
 
 def cell(rows: list[dict], metric: str) -> tuple[float, float] | None:
@@ -101,13 +104,18 @@ def table(runs, metric: str, baseline: str | None) -> tuple[str, dict[str, float
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--results-dir", default="results")
-    parser.add_argument("--baseline", help="arm tag (seed stripped) every other arm is compared with")
+    parser.add_argument("--results-dir", default="results-proposal")
+    parser.add_argument("--track", help="keep only runs of this track (tags '<arm>-<track>[-s<seed>]')")
+    parser.add_argument("--baseline", help="arm tag (seed stripped) every other arm is compared with (default sft-<track>)")
+    parser.add_argument("--family", default=r"^csrd-(?!qkrestore)", help="regex of the arms forming the Holm family")
     args = parser.parse_args()
 
     runs = load(Path(args.results_dir))
+    if args.track:
+        runs = {tag: rows for tag, rows in runs.items() if tag.endswith(f"-{args.track}")}
+        args.baseline = args.baseline or f"sft-{args.track}"
     if not runs:
-        raise SystemExit(f"no */summary.json under {args.results_dir}")
+        raise SystemExit(f"no */summary.json under {args.results_dir}" + (f" for {args.track}" if args.track else ""))
     parts, gates = [], {}
     for metric in ("pass@1", "pass@3"):
         text, averages = table(runs, metric, args.baseline)
@@ -117,19 +125,20 @@ def main() -> None:
                            "G5_accuracy": (avg - averages[args.baseline]) * 100 >= 1.5}
                      for tag, avg in averages.items() if tag != args.baseline}
     output = "\n\n".join(parts)
-    tests = significance(Path(args.results_dir), runs, args.baseline) if args.baseline in runs else {}
+    tests = significance(Path(args.results_dir), runs, args.baseline, args.family) if args.baseline in runs else {}
     if tests:
         output += (f"\n\n### Paired permutation vs {args.baseline} (problem level, Holm-corrected)\n\n"
-                   "| Arm | Δ pass@1 (pp, problem mean) | problems | p | p (Holm) |\n|---|---|---|---|---|\n"
+                   "| Arm | Δ pass@1 (pp, problem mean) | problems | p | p (Holm, CSRD family) |\n|---|---|---|---|---|\n"
                    + "\n".join(f"| {arm} | {t['delta_pp_problem_mean']:+.2f} | {t['problems']} | {t['p']:.4f} | {t['p_holm']:.4f} |"
                                 for arm, t in tests.items()))
     if gates:
         output += "\n\n### G5 (pass@1 criterion)\n\n" + "\n".join(
             f"- {tag}: {g['delta_pass@1_pp']:+.2f} pp -> {'PASS' if g['G5_accuracy'] else 'fail'}" for tag, g in gates.items())
     print(output)
-    Path(args.results_dir, "comparison-table.md").write_text(output + "\n")
-    Path(args.results_dir, "gates-g5.json").write_text(json.dumps(gates, indent=2))
-    Path(args.results_dir, "significance.json").write_text(json.dumps(tests, indent=2))
+    suffix = f"-{args.track}" if args.track else ""
+    Path(args.results_dir, f"comparison-table{suffix}.md").write_text(output + "\n")
+    Path(args.results_dir, f"gates-g5{suffix}.json").write_text(json.dumps(gates, indent=2))
+    Path(args.results_dir, f"significance{suffix}.json").write_text(json.dumps(tests, indent=2))
 
 
 if __name__ == "__main__":

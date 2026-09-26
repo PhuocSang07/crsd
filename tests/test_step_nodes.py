@@ -1,7 +1,8 @@
 """Step nodes on character spans (Sec. 4.1, Appendix B)."""
 
-from prompting import question_char_span, user_content
-from step_nodes import assign_token_spans, build_nodes, split_steps, token_node_ids
+from prompting import render, split_response, user_content
+from step_nodes import assign_token_spans, build_nodes, split_steps
+from stubs import R1Tokenizer, WordTokenizer, content
 
 
 def _covers(text, spans):
@@ -52,31 +53,52 @@ def test_other_modes_cover_text():
     assert [text[s:].split()[0] for s, _ in episode] == ["Let", "Wait,", "Hmm,"]
 
 
-def test_build_nodes_and_token_mapping():
-    question = "What is 2+2?"
-    prompt = f"<|im_start|>user\n{user_content(question)}<|im_end|>\n<|im_start|>assistant\n"
-    steps = ["We need to add two and two, which is a simple sum.", "Two plus two gives four, so the result is four."]
-    response = "<think>\n" + "\n\n".join(steps) + "\n</think>\n\nThe answer is \\boxed{4}."
-    nodes = build_nodes(prompt, response, question_char_span(prompt, question))
-    text = prompt + response
-    assert [n["kind"] for n in nodes] == ["question", "step", "step", "answer"]
-    assert text[nodes[0]["char_start"]:nodes[0]["char_end"]] == user_content(question)
-    assert text[nodes[1]["char_start"]:nodes[1]["char_end"]].startswith("We need")
-    assert text[nodes[2]["char_start"]:nodes[2]["char_end"]] == steps[1]
-    assert text[nodes[3]["char_start"]:nodes[3]["char_end"]] == "The answer is \\boxed{4}."
-    # character-level "tokenizer": token t starts at character t
-    spans = assign_token_spans(nodes, list(range(len(text))))
-    assert spans[0] == (nodes[0]["char_start"], nodes[0]["char_end"])
-    ids = token_node_ids(spans, len(text))
-    assert ids[text.index("<think>")] == -1 and ids[text.index("</think>")] == -1 and ids[0] == -1
+def test_render_sgl_matches_the_baselines_format():
+    tok, c = WordTokenizer(), content(3)
+    r = render(tok, c, "sgl")
+    assert r["prompt"].endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert user_content(c["question"]) in r["prompt"] and user_content("x").startswith("Please reason step by step")
+    assert r["response"] == c["thinking"] + "\n\n\n" + c["answer"]  # SGL strips the markers
+    t0, t1 = r["thinking_span"]
+    a0, a1 = r["answer_span"]
+    assert r["response"][t0:t1] == c["thinking"] and r["response"][a0:a1] == c["answer"]
 
 
-def test_build_nodes_rejects_unclosed_or_empty_answer():
-    q = "q"
-    prompt = user_content(q)
-    span = question_char_span(prompt, q)
-    assert build_nodes(prompt, "<think>\nlong reasoning without end", span) is None
-    assert build_nodes(prompt, "<think>\nsome reasoning here\n</think>\n\n", span) is None
+def test_render_thinking_for_qwen3_and_r1_templates():
+    c = content(3)
+    qwen = render(WordTokenizer(), c, "thinking")
+    assert qwen["response"] == f"<think>\n{c['thinking']}\n</think>\n\n{c['answer']}"
+    r1 = render(R1Tokenizer(), c, "thinking")
+    assert r1["prompt"].endswith("<think>\n") and r1["response"].startswith(c["thinking"][:10])
+    assert "<think>" not in r1["response"]
+
+
+def test_node_hashes_agree_across_styles_and_tokenizers():
+    c = content(12)
+    views = [render(WordTokenizer(), c, "sgl"), render(WordTokenizer(), c, "thinking"), render(R1Tokenizer(), c, "thinking")]
+    node_sets = [build_nodes(v) for v in views]
+    hashes = [[n["hash"] for n in nodes] for nodes in node_sets]
+    assert hashes[0] == hashes[1] == hashes[2]
+    assert [n["kind"] for n in node_sets[0]] == ["question"] + ["step"] * 12 + ["answer"]
+    for view, nodes in zip(views, node_sets):
+        text = view["prompt"] + view["response"]
+        assert text[nodes[0]["char_start"]:nodes[0]["char_end"]] == user_content(c["question"])
+        assert text[nodes[-1]["char_start"]:nodes[-1]["char_end"]] == c["answer"]
+        assert "<think>" not in "".join(text[n["char_start"]:n["char_end"]] for n in nodes)
+
+
+def test_truncated_content_has_no_answer_node():
+    c = {**content(5), "answer": ""}
+    nodes = build_nodes(render(WordTokenizer(), c, "sgl"))
+    assert nodes[-1]["kind"] == "step" and len(nodes) == 6
+
+
+def test_split_response_both_styles():
+    assert split_response("<think>\nwork\n</think>\n\nans") == {"thinking": "work", "answer": "ans", "closed": True}
+    assert split_response("work\n</think>\n\nans")["thinking"] == "work"  # R1 template opened <think>
+    assert split_response("step one\n\nstep two\n\n\nFinal \\boxed{1}")["answer"] == "Final \\boxed{1}"
+    assert split_response("<think>\nnever closes")["closed"] is False
+    assert split_response("no separator at all")["closed"] is False
 
 
 def test_assign_token_spans_with_merged_tokens():
