@@ -9,3 +9,6 @@ __pycache__/
 /logs/
 *.npz
 *.pt
+/signals/
+/logs-*.txt
+*.safetensors
