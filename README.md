@@ -14,7 +14,8 @@ cấu hình LoRA/lịch/batch, và được eval bằng **cùng một script, m�
 
 | Track | Teacher | Dữ liệu train (chung cho mọi arm) | Student | Vai trò |
 |---|---|---|---|---|
-| `read-q8b-1.7b` | Qwen3-8B đọc lại | s1K-1.1 (trace DeepSeek-R1) | Qwen3-1.7B-Base | chính (cặp pilot của proposal) |
+| `read-q8b-r1.5b` | Qwen3-8B đọc lại | s1K-1.1 (trace DeepSeek-R1) | DeepSeek-R1-Distill-Qwen-1.5B | **chính cho cặp nhỏ** (cùng student với baseline SGL) |
+| `read-q8b-1.7b` | Qwen3-8B đọc lại | s1K-1.1 (trace DeepSeek-R1) | Qwen3-1.7B-Base | bỏ: với cấu hình SGL, student Base không học được format R1 |
 | `read-d32b-q8b` | DeepSeek-R1-Distill-Qwen-32B đọc lại | s1K-1.1 | Qwen3-8B | chính (cùng student với P-ALIGN/SSFT) |
 | `gen-q8b-1.7b` | Qwen3-8B tự viết rồi đọc | s1K-Q8B | Qwen3-1.7B-Base | ablation: teacher = tác giả (§6.1) |
 | `gen-d32b-q8b` | R1-Distill-32B tự viết rồi đọc | s1K-D32B | Qwen3-8B | ablation |
@@ -82,6 +83,24 @@ bash scripts/diag/diag.sh read-d32b-q8b checkpoints/sft-read-d32b-q8b-s42 sft-re
 python src/compare_results.py --results-dir results-proposal --track read-d32b-q8b
 python src/pilot_report.py --track read-d32b-q8b
 ```
+
+### Script theo style SGL: R1-Distill-Qwen-1.5B, read mode (chạy trên B200)
+
+Mỗi pha một script riêng cho model, biến viết hoa, `OPTS+=`, `CMD=…; echo; ${CMD} | tee logs/…`, driver
+`project_commands_*.sh` chạy idempotent — đúng khuôn `SpectralGuidedLearning/scripts/spectral/spectral_lora_r1-qwen-1.5b.sh`:
+
+```bash
+GPUS="0 1 2 3 4 5 6 7" bash project_commands_csrd_r1-qwen-1.5b.sh     # data -> teacher bank -> CSRD λ 0.1 -> eval -> compare
+bash scripts/data/data_r1-qwen-1.5b.sh            # Phase 1: canonical s1K-1.1 + record teacher (Qwen3-8B) / student (SGL format)
+GPUS="0 1 2 3" bash scripts/teacher/teacher_qwen3-8b.sh   # Phase 2: bank tín hiệu Qwen3-8B (bỏ qua nếu đã có file bank)
+GPUS="0 1 2 3" CSRD_LAMBDA=0.1 bash scripts/csrd/csrd_lora_r1-qwen-1.5b.sh   # Phase 3: -> checkpoints/csrd-lora-l0.1-r1-qwen-1.5b
+bash scripts/eval/eval_r1-qwen-1.5b.sh checkpoints/csrd-lora-l0.1-r1-qwen-1.5b csrd-lora-l0.1-r1-qwen-1.5b   # Phase 4: P-ALIGN
+```
+
+Train: `train_sft.py` + DeepSpeed ZeRO-2 offload, LoRA r16/α16, lr 5e-5 → 1e-5, 3 epoch, batch hiệu dụng 32 (= #GPU × GA),
+seed 42, 32k token — y hệt arm spectral-lora của SGL, chỉ thêm khối `--csrd-*`. Bank tín hiệu không phụ thuộc student:
+chép `signals/q8b-s1k11-dmin4-excess_bg.safetensors` sang máy mới để bỏ qua Phase 2. SFT đối chứng = arm vanilla của SGL
+(chép `results/vanilla-r1-qwen-1.5b` của SGL vào `results-palign/` để `compare_results.py` kiểm định cặp).
 
 Kiểm thử (CPU): `python -m pytest tests -q` và
 `python scripts/smoke_test_pipeline.py --teacher-tokenizer <tokenizer R1-Distill> --student-tokenizer <tokenizer Qwen3>`.

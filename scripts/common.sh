@@ -3,6 +3,7 @@
 #
 # Tracks (teacher -> student, training data):
 #   read-q8b-1.7b   Qwen3-8B reads s1K-1.1 (R1 traces)            -> Qwen3-1.7B-Base   (main: same data as the baselines)
+#   read-q8b-r1.5b  Qwen3-8B reads s1K-1.1 (R1 traces)            -> R1-Distill-Qwen-1.5B (main: same student as the SGL baselines)
 #   read-d32b-q8b   R1-Distill-Qwen-32B reads s1K-1.1 (R1 traces)  -> Qwen3-8B          (main: same student as P-ALIGN/SSFT)
 #   gen-q8b-1.7b    Qwen3-8B writes s1K-Q8B and reads it          -> Qwen3-1.7B-Base   (ablation: teacher = author)
 #   gen-d32b-q8b    R1-Distill-Qwen-32B writes s1K-D32B, reads it  -> Qwen3-8B          (ablation: teacher = author)
@@ -16,9 +17,10 @@
 #   checkpoints/<arm>-<track>-s<seed>, results-{proposal,palign}/<tag>
 set -euo pipefail
 
-TRACK="${1:?track is required: read-q8b-1.7b | read-d32b-q8b | gen-q8b-1.7b | gen-d32b-q8b}"
+TRACK="${1:?track is required: read-q8b-1.7b | read-q8b-r1.5b | read-d32b-q8b | gen-q8b-1.7b | gen-d32b-q8b}"
 case "${TRACK}" in
   read-q8b-1.7b) TT=q8b;  TEACHER_DIR=Qwen3-8B;                     STUDENT_DIR=Qwen3-1.7B-Base; MODE=read ;;
+  read-q8b-r1.5b) TT=q8b; TEACHER_DIR=Qwen3-8B;                     STUDENT_DIR=DeepSeek-R1-Distill-Qwen-1.5B; MODE=read ;;
   read-d32b-q8b) TT=d32b; TEACHER_DIR=DeepSeek-R1-Distill-Qwen-32B; STUDENT_DIR=Qwen3-8B;        MODE=read ;;
   gen-q8b-1.7b)  TT=q8b;  TEACHER_DIR=Qwen3-8B;                     STUDENT_DIR=Qwen3-1.7B-Base; MODE=gen ;;
   gen-d32b-q8b)  TT=d32b; TEACHER_DIR=DeepSeek-R1-Distill-Qwen-32B; STUDENT_DIR=Qwen3-8B;        MODE=gen ;;
