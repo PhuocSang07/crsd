@@ -84,13 +84,26 @@ python src/compare_results.py --results-dir results-proposal --track read-d32b-q
 python src/pilot_report.py --track read-d32b-q8b
 ```
 
-### Script theo style SGL: R1-Distill-Qwen-1.5B, read mode (chạy trên B200)
+### Script theo style SGL: R1-Distill-Qwen-1.5B, read mode (B200 / H200)
 
 Mỗi pha một script riêng cho model, biến viết hoa, `OPTS+=`, `CMD=…; echo; ${CMD} | tee logs/…`, driver
-`project_commands_*.sh` chạy idempotent — đúng khuôn `SpectralGuidedLearning/scripts/spectral/spectral_lora_r1-qwen-1.5b.sh`:
+`project_commands_*.sh` chạy idempotent — đúng khuôn `SpectralGuidedLearning/scripts/spectral/spectral_lora_r1-qwen-1.5b.sh`.
+Pipeline chạy offline (`HF_HUB_OFFLINE=1`, tắt usage stats của vLLM); model/data phải có sẵn ở `LOCAL_MODELS_ROOT` /
+`LOCAL_DATA_ROOT` (danh sách: `download.txt`).
+
+Server mới (ví dụ H200; cần driver NVIDIA ≥ 580 cho wheel cu130):
 
 ```bash
-GPUS="0 1 2 3 4 5 6 7" bash project_commands_csrd_r1-qwen-1.5b.sh     # data -> teacher bank -> CSRD λ 0.1 -> eval -> compare
+export PROJECT_ENV=/path/to/uvenvs/crsd LOCAL_MODELS_ROOT=/path/to/models LOCAL_DATA_ROOT=/path/to/datasets
+bash scripts/setup.sh                                  # venv (uv, cần PyPI), pin = crsd.txt
+bash scripts/data/download_r1-qwen-1.5b.sh             # Phase 0 (cần HF Hub): s1K-1.1, 4 tập test, Qwen3-8B, R1-Distill-1.5B
+GPUS="0 1 2 3 4 5 6 7" bash project_commands_csrd_r1-qwen-1.5b.sh   # data -> bank -> zero-shot eval -> CSRD λ 0.1 -> eval
+```
+
+Từng pha:
+
+```bash
+GPUS="0 1 2 3 4 5 6 7" bash project_commands_csrd_r1-qwen-1.5b.sh     # data -> teacher bank -> zero-shot eval -> CSRD λ 0.1 -> eval -> compare
 bash scripts/data/data_r1-qwen-1.5b.sh            # Phase 1: canonical s1K-1.1 + record teacher (Qwen3-8B) / student (SGL format)
 GPUS="0 1 2 3" bash scripts/teacher/teacher_qwen3-8b.sh   # Phase 2: bank tín hiệu Qwen3-8B (bỏ qua nếu đã có file bank)
 GPUS="0 1 2 3" CSRD_LAMBDA=0.1 bash scripts/csrd/csrd_lora_r1-qwen-1.5b.sh   # Phase 3: -> checkpoints/csrd-lora-l0.1-r1-qwen-1.5b

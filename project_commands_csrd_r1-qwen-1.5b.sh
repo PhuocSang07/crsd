@@ -5,6 +5,8 @@
 #   -> CSRD lambda 0.1 (LoRA, DeepSpeed ZeRO-2, SGL config) -> P-ALIGN eval -> compare.
 # The SFT control is the SGL run of the same config (SpectralGuidedLearning, vanilla arm): not retrained here.
 #   GPUS="0 1 2 3 4 5 6 7" bash project_commands_csrd_r1-qwen-1.5b.sh
+# New server: bash scripts/setup.sh (venv, needs PyPI) -> bash scripts/data/download_r1-qwen-1.5b.sh (models/datasets,
+# needs the HF Hub) -> this driver (offline), which rebuilds the records and the Qwen3-8B signal bank from scratch.
 # Comment out any line you don't want to run.
 set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +25,12 @@ TAG="csrd-lora-l${CSRD_LAMBDA}-r1-qwen-1.5b"
 # The bank is student-independent (~260 MB): copy signals/q8b-s1k11-dmin4-excess_bg.safetensors from the box that
 # built it to skip this phase, or let it rebuild (Qwen3-8B, one shard per GPU).
 [[ -s signals/q8b-s1k11-dmin4-excess_bg.safetensors ]] || bash scripts/teacher/teacher_qwen3-8b.sh
+
+# ======================= EVAL SANITY (zero-shot) ======================
+# The untrained student under the same eval (~10 min): should reproduce the baselines' table (zero-shot 36.92 / 49.75
+# mean pass@1 / pass@3); its truncation_rate / length are the reference for the CSRD run. Skipped once it exists.
+[[ -f results-palign/zeroshot-r1-qwen-1.5b/summary.json ]] || \
+  GPUS="${GPUS%% *}" bash scripts/eval/eval_r1-qwen-1.5b.sh base zeroshot-r1-qwen-1.5b
 
 # ============================ TRAIN ============================
 bash scripts/csrd/csrd_lora_r1-qwen-1.5b.sh

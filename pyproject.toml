@@ -11,22 +11,24 @@ dependencies = [
     "torchaudio==2.11.0",
     "vllm==0.27.1",
     "transformers==5.5.3",
-    "peft>=0.13",
-    "deepspeed>=0.15",
-    "datasets>=2.20",
-    "accelerate>=1.0",
-    "numpy>=2.0,<2.5",
+    # pins = crsd.txt (repo root) = spectral_guided_learning.txt, the stack already run on B200
+    "peft==0.20.0",
+    "deepspeed==0.19.6",
+    "datasets==5.0.1",
+    "accelerate==1.14.0",
+    "numpy==2.3.5",
     "scipy>=1.13",
     "scikit-learn>=1.5",   # D3 logistic regression / AUC
-    "pandas>=2.2",
-    "pyarrow",
+    "pandas==3.0.5",
+    "pyarrow==25.0.1",
     "matplotlib",
-    "pyyaml",
-    "tqdm",
+    "pyyaml==6.0.3",
+    "tqdm==4.70.0",
     "safetensors",
+    "huggingface_hub",     # scripts/data/download_*.sh (online setup only)
     "math-verify==0.8.0",
     "pylatexenc",          # oat_math_grader's latex->text branch (else palign_grader silently runs math_verify only)
-    "pytest",
+    "pytest==9.1.1",
 ]
 
 [tool.uv]
