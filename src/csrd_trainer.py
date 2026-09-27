@@ -1,21 +1,14 @@
 """Trainer plumbing for L = L_CE + lambda_r L_route + lambda_m L_mass + lambda_c L_causal (Eq. 7).
 
-Mixed in before the CE trainer (train_sft.py): `class CSRDTrainer(CSRDLossMixin, CESFTTrainer)`.
-One training step (Algorithm 1):
-    1. sample m query tokens per row with |F(i)| >= 2: the last token of the step + m-1 random ones
-    2. one forward (SDPA/FlashAttention) gives L_CE; the attention wrapper keeps q (post-RoPE, at
-       the sampled positions) and k of the student heads H_S
-    3. per head: exact causal softmax of the sampled queries over all keys -> node masses ->
-       far-normalized R_t, Z_t -> row means; heads averaged per depth band -> Q_i, Z_S,i
+Used as `class CSRDTrainer(CSRDLossMixin, CESFTTrainer)` (train_sft.py). One step (Algorithm 1):
+    1. sample m query tokens per row with |F(i)| >= 2: the step's last token + m-1 random ones
+    2. one forward gives L_CE; the attention wrapper keeps q (sampled positions) and k of the heads H_S
+    3. per head: exact causal softmax -> node masses -> far-normalized R_t, Z_t -> row means;
+       heads averaged per depth band -> Q_i, Z_S,i
     4. KL losses against the teacher's P_i, Z_T,i (and C~_i on the causal subset)
-
-Student heads H_S: during the CE-only warmup (lambda_r = 0 for the first 10% of steps) receiver
-scores of every student head are accumulated from the sampled queries; at the end of warmup the
-top K_S per band are fixed (A5 alternatives: all heads of the band, or a given heads.json).
-lambda_r then ramps linearly to its target over the next 10% of steps.
-
-Variants: CSRD-A (row weights 1 + beta * anchor), CSRD-PQ (per-query, per-head KL, A14), CSRD-QK
-(the routing loss trains only a separate Q/K adapter, from detached inputs; A12).
+H_S: receiver scores accumulate during the CE-only warmup, then the top K_S per band are fixed
+(A5: all heads of the band, or a given heads.json); lambda_r then ramps linearly.
+Variants: CSRD-A (anchor row weights), CSRD-PQ (per-query KL, A14), CSRD-QK (separate Q/K adapter, A12).
 """
 
 import json
@@ -62,8 +55,7 @@ def key_node_ids(node_spans: torch.Tensor, length: int) -> torch.Tensor:
 
 
 def sample_queries(node_spans: torch.Tensor, rows: torch.Tensor, m: int, generator: torch.Generator | None = None):
-    """Q_S(i): the last token of each valid row's node plus m-1 other tokens of it drawn without
-    replacement (all of them if the node is shorter). m <= 0 means every token (A6 "all").
+    """Q_S(i): last token of each valid row's node + m-1 others without replacement (m <= 0: all, A6).
     Returns (positions [Nq], rows [Nq]) on node_spans' device."""
     positions, owners = [], []
     for i in torch.nonzero(rows, as_tuple=False).squeeze(-1).tolist():
@@ -92,22 +84,12 @@ class HeadsCheckpointCallback(TrainerCallback):
 
 
 class CSRDLossMixin:
-    """Constructor kwargs (popped before Trainer):
+    """Constructor kwargs (popped before Trainer; see train_sft.py --csrd-* for the rest):
         csrd_lambda            lambda_r at full strength
-        csrd_mass_ratio        lambda_m / lambda_r (0.1; 0 = ablation A7)
-        csrd_causal_ratio      lambda_c / lambda_r (1.0; used only on samples with causal targets)
-        csrd_route_ratio       weight of L_route relative to lambda_r (1.0; 0 with causal targets = A3 "causal only")
-        csrd_bands             depth bands entering the losses, e.g. (0, 1) both (default), (0,) = B1 only (A4)
-        csrd_d_min             far threshold in steps (must match the targets)
-        csrd_queries           m, queries per row (A6; <= 0 = all tokens)
-        csrd_k_student         K_S heads per band
+        csrd_route_ratio       L_route weight / lambda_r (0 with causal targets = A3 "causal only")
         csrd_head_mode         "receiver" (select after warmup) | "band" (all heads of each band) | "fixed"
         csrd_student_heads     dict (heads.json payload) for "fixed" / resume
-        csrd_score             receiver score for student selection ("excess_bg" | "kurtosis")
-        csrd_anchor_beta       CSRD-A row weight 1 + beta * anchor (0 = uniform)
-        csrd_loss_form         "pooled" (Eq. 4) | "per_query" (CSRD-PQ)
-        csrd_warmup_frac       CE-only share of steps (0.1)
-        csrd_ramp_frac         linear ramp share after warmup (0.1)
+        csrd_warmup_frac       CE-only share of steps; csrd_ramp_frac: linear ramp share after it
         csrd_qk_adapter        name of the separate Q/K adapter (CSRD-QK) or None
         csrd_head_checkpoint   recompute per-head score matrices in backward (memory)
         csrd_grad_log_interval every N steps log ||grad CE||, ||grad route|| and their cosine (0 = off)
@@ -181,10 +163,8 @@ class CSRDLossMixin:
 
     # ---------------------------------------------------------------- CSRD-QK
     def _setup_qk_adapter(self):
-        """Grad routing for CSRD-QK: CE gradients never reach the Q/K adapter and routing-loss gradients
-        reach nothing else. A tensor hook on each Q/K adapter parameter *replaces* the gradient of the
-        Trainer's (CE-only) backward with the routing gradient computed in compute_loss; DDP/ZeRO then
-        reduce the replaced value as usual (their hooks run on accumulation, after ours)."""
+        """CSRD-QK: a tensor hook on each Q/K adapter parameter *replaces* its CE gradient with the routing
+        gradient from compute_loss; DDP then reduces the replaced value (its hooks run after ours)."""
         self._qk_params, self._qk_pending, self._qk_replace = [], {}, False
         if not self.csrd_qk_adapter:
             return
@@ -224,8 +204,7 @@ class CSRDLossMixin:
         return by_layer
 
     def _arm_head_stats(self, key_nodes, far, positions, owners):
-        """Warmup: receiver statistics of every head from the sampled queries, computed inside the
-        layer hooks without grad (nothing is stored across layers but nu [H, N])."""
+        """Warmup: receiver statistics nu [L, H, N] of every head, computed without grad inside the layer hooks."""
         num_nodes = far.size(0)
         nu = torch.full((self.num_layers, self.num_heads, num_nodes), float("nan"), device=positions.device)
         pending = set(range(self.num_layers))
@@ -314,7 +293,7 @@ class CSRDLossMixin:
         device = far.device
         weights = 1.0 + self.csrd_anchor_beta * targets["anchor"].to(device)
         C_tilde = support = None
-        # the signal bank carries causal targets for the causal subset; only CSRD-C (lambda_c > 0) uses them
+        # causal targets are used only by CSRD-C (lambda_c > 0)
         if "C" in targets and self.csrd_causal_ratio > 0:
             C_tilde, support = causal_target(targets["C"].to(device), targets["J"].to(device), far)
         L_route = L_mass = L_causal = torch.zeros((), device=device)
@@ -397,15 +376,13 @@ class CSRDLossMixin:
             L_route, L_mass, L_causal, stats = self._aux_losses(targets, band_routing, owners, far, rows)
             aux = lam * (self.csrd_route_ratio * L_route + self.csrd_mass_ratio * L_mass
                          + self.csrd_causal_ratio * L_causal)
-            # loss_ce is already a share of the step-level sum/Z; the auxiliary term is a per-sequence
-            # mean, so divide by the accumulation count or lambda would scale with it.
+            # aux is a per-sequence mean, loss_ce a share of the step sum/Z: divide or lambda scales with accumulation.
             aux_scaled = aux / accumulation
             if self._should_log_grads():
                 self._log_grad_stats(loss_ce, aux_scaled)
             if self.csrd_qk_adapter:
                 grads = torch.autograd.grad(aux_scaled, self._qk_params, allow_unused=True)
-                # accelerator.backward divides the returned loss by its accumulation count; the replaced
-                # gradient bypasses that, so apply it here to keep the shared-adapter scaling of L_route.
+                # the replaced gradient bypasses accelerator.backward's 1/accumulation scaling, so apply it here.
                 ga = self.accelerator.gradient_accumulation_steps
                 self._qk_pending = {id(p): (g.detach() / ga if g is not None else None)
                                     for p, g in zip(self._qk_params, grads)}
@@ -429,8 +406,7 @@ class CSRDLossMixin:
             self._qk_replace, self._qk_pending = False, {}
 
     def _recomputed_qk(self, wanted, positions):
-        """CSRD-QK: q/k recomputed from the *detached* attention inputs, so routing gradients reach only the
-        same layer's projections (and, via the grad hook, only its Q/K adapter)."""
+        """CSRD-QK: q/k recomputed from the *detached* attention inputs (gradients reach only this layer's Q/K)."""
         sample_q, sample_k = {}, {}
         for layer, heads in wanted.items():
             hidden, position_embeddings = self._input_capture.inputs[layer]
@@ -471,8 +447,7 @@ class CSRDLossMixin:
                 obj.__dict__.update(state)
 
     def _log_grad_stats(self, loss_ce, aux_scaled):
-        """||grad CE||, ||grad route|| and cos(grad CE, grad route) on the shared LoRA parameters (Sec. 4.7:
-        a persistently negative cosine means switching to CSRD-QK or PCGrad)."""
+        """||grad CE||, ||grad route|| and their cosine on the shared LoRA parameters (Sec. 4.7)."""
         params = self._shared_params
 
         def grads_of(loss):
@@ -483,7 +458,7 @@ class CSRDLossMixin:
             with self._backward_hooks_muted():
                 g_ce = grads_of(loss_ce)
                 g_route = grads_of(aux_scaled) if aux_scaled.requires_grad else torch.zeros_like(g_ce)
-        except Exception as exc:  # a diagnostic is never worth taking the run down for
+        except Exception as exc:  # never let a diagnostic kill the run
             self.csrd_grad_log_interval = 0
             if self.is_world_process_zero():
                 print(f"grad diagnostic failed ({type(exc).__name__}: {exc}); disabled")

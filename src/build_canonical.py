@@ -6,8 +6,6 @@
                       sharing no 13-gram with s1K or a test set -- held-out R1-written traces for D1/D2/D4
     --source jsonl    anything with {id, question, response} (generate_traces.py --stage select, or
                       evaluate.py --export-traces rollouts): the response is split into thinking/answer
-
-Teacher and student records are both built from this one file (data_prep.py), so they share content.
 """
 
 import argparse
@@ -137,8 +135,7 @@ def main() -> None:
     closed = sum(r["closed"] for r in records)
     print(f"wrote {len(records)} canonical traces ({closed} closed) -> {output}")
     if args.source == "openr1":
-        # The HF streaming reader's background threads abort the interpreter at shutdown ("PyGILState_Release"),
-        # turning a finished run into exit code 134. Everything is written and flushed: leave immediately.
+        # HF streaming threads abort the interpreter at shutdown (exit 134); output is flushed, so exit now.
         import os
         import sys
 

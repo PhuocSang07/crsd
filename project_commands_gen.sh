@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Ablation: the teacher WRITES its own traces on the s1K questions and reads them (teacher = author, proposal
-# Sec. 6.1); the student still trains on the SGL format. Compare with project_commands_read.sh (main): same
-# students, same config, but the data differ from the baselines', so baselines would have to be retrained here.
-#   gen-q8b-1.7b    Qwen3-8B writes s1K-Q8B            -> Qwen3-1.7B-Base
-#   gen-d32b-q8b    R1-Distill-Qwen-32B writes s1K-D32B -> Qwen3-8B
-# Comment out any line you don't want; every stage skips what already exists.
+# Ablation: the teacher writes its own traces on the s1K questions and reads them (teacher = author); the student
+# still trains on the SGL format. Tracks: scripts/common.sh. Every stage skips what already exists.
 set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${BASE}"
@@ -15,14 +11,14 @@ PROJECT_ENV="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}"
 TRACKS=(${TRACKS:-gen-q8b-1.7b gen-d32b-q8b})
 SEEDS=(${SEEDS:-42 43 44})
 LAMBDAS=(${LAMBDAS:-0.3 1})
-PILOT_N="aime24=8,aime25=8,amc12=8"   # Table 6; drop N_SAMPLES_MAP for the main table (n = 16)
+PILOT_N="aime24=8,aime25=8,amc12=8"   # pilot n; drop N_SAMPLES_MAP for the main table (n = 16)
 
 for TRACK in "${TRACKS[@]}"; do
   # ===================== DATA + TEACHER SIGNALS =====================
-  bash scripts/gen/gen_traces.sh "${TRACK}"          # 8 traces per s1K question + 300 held-out (G0 >= 600)
+  bash scripts/gen/gen_traces.sh "${TRACK}"
   bash scripts/data/canonical.sh "${TRACK}"
-  bash scripts/data/records.sh "${TRACK}"            # teacher (thinking) / student (SGL) renderings, anchors
-  bash scripts/targets/teacher_signals.sh "${TRACK}" # heads, P/Z, causal -> one reusable signal bank
+  bash scripts/data/records.sh "${TRACK}"
+  bash scripts/targets/teacher_signals.sh "${TRACK}"
 
   # ===================== WEEK 1: DIAGNOSTICS =====================
   bash scripts/train/train.sh "${TRACK}" sft 42

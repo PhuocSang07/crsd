@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-# Teacher side of CSRD (Sec. 4.3-4.4) for one track, teacher-forced on its own rendering (--style thinking):
-#   1. calibrate receiver scores of every head on D_cal (first 200 train traces)
-#   2. select top-16 heads per depth band (excess kurtosis after background subtraction; raw kurtosis, random
-#      and whole-band selections written too, for A2/A5)
-#   3. routing targets P, Z on every train trace; causal targets by attention suppression on 20% of them
-#   4. pack both into ONE reusable signal bank, keyed by node-text hashes: signals/<TT>-<CANON>-dmin<D>-<SCORE>.safetensors
-#      -- any student (any tokenizer) whose records have the same nodes trains from it, no teacher rerun
-#   5. held-out traces: targets with per-head R (D4) and causal targets on 20 traces, kept as a directory
-# Every stage resumes (skips finished traces / outputs). The 32B teacher runs sharded over TEACHER_GPUS GPUs.
-# SKIP_TRAIN_CAUSAL=true: no train-side causal targets yet (default CSRD arms do not use them).
+# Teacher signals for one track: head calibration on D_cal (first 200 traces) -> top-16 heads per band -> routing
+# targets (+ causal targets on 20%) -> one reusable signal bank; then held-out targets. Every stage resumes.
+# Env: SKIP_TRAIN_CAUSAL=true skips train-side causal targets (only CSRD-C needs them); SKIP_CAUSAL=true skips all.
 # Usage: scripts/targets/teacher_signals.sh TRACK
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../common.sh" "${1:-}"
@@ -29,11 +22,11 @@ calibration_complete() {  # every shard of the current GPU grouping is present
 
 if [[ -s "${SIGNALS}" ]]; then
   echo "signal bank ${SIGNALS} already exists (reused; delete it to rebuild)"
-  # a bank copied from another machine carries its head selection; the held-out stage below needs it
+  # a copied bank carries its head selection, which the held-out stage needs
   [[ -f "${ROUTING}/heads-${SCORE}.json" ]] || python src/signal_bank.py heads "${SIGNALS}" "${ROUTING}/heads-${SCORE}.json"
 else
   if ! calibration_complete; then
-    rm -f "${ROUTING}"/calib-*.npz  # partial or from another GPU count: redo, or D_cal would silently shrink
+    rm -f "${ROUTING}"/calib-*.npz  # stale shards would silently shrink D_cal
     sharded "calibrate-${TT}-${TRAIN_CANON}" python -u src/extract_routing.py --stage calibrate --model-name "${TEACHER}" \
       --data-path "${TEACHER_TRAIN_RECORDS}" --output-dir "${ROUTING}" --n-traces ${N_CAL} --d-min ${D_MIN} "${DEVICE_OPTS[@]}"
   fi
@@ -43,8 +36,6 @@ else
   sharded "targets-${TT}-${TRAIN_CANON}" python -u src/extract_routing.py --stage targets --model-name "${TEACHER}" \
     --data-path "${TEACHER_TRAIN_RECORDS}" --heads-json "${ROUTING}/heads-${SCORE}.json" --output-dir "${TARGETS}" \
     --d-min ${D_MIN} --source-name "${TRAIN_CANON}" "${DEVICE_OPTS[@]}"
-  # SKIP_TRAIN_CAUSAL=true defers the train-side causal targets (only CSRD-C / causal_heads.sh need them; ~25
-  # forwards per trace on 20% of the traces) while keeping the 20 held-out causal traces that G4 needs.
   if [[ "${SKIP_CAUSAL:-false}" != true && "${SKIP_TRAIN_CAUSAL:-false}" != true ]]; then
     sharded "causal-${TT}-${TRAIN_CANON}" python -u src/causal_targets.py --model-name "${TEACHER}" \
       --data-path "${TEACHER_TRAIN_RECORDS}" --targets-dir "${TARGETS}" --output-dir "${CAUSAL}" --fraction 0.2 \

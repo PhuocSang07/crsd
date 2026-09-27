@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
-# Phase 4: eval -- DeepSeek-R1-Distill-Qwen-1.5B track, P-ALIGN protocol (= SpectralGuidedLearning/scripts/eval/
-# eval_r1-qwen-1.5b.sh): thinking OFF in the template call, n=3, T=0.6, top_p=0.9, repetition_penalty=1.05,
-# 4096-token context (3584 new tokens), AIME24/AIME25/AMC12/MATH500, Pass@1 + Pass@3, grader math_verify OR
-# oat_math_grader (src/palign_grader.py, copied from SGL), so the numbers sit next to the SGL baselines' table.
+# Phase 4: eval -- DeepSeek-R1-Distill-Qwen-1.5B track, P-ALIGN protocol and grader (same as SGL eval_r1-qwen-1.5b.sh).
 # Usage: scripts/eval/eval_r1-qwen-1.5b.sh [CKPT] [TAG]      (CKPT = adapter dir, full model dir, or "base")
 set -euo pipefail
 
 read -ra GPUS <<< "${GPUS:-0}"
 export CUDA_VISIBLE_DEVICES=$(IFS=,; echo "${GPUS[*]}")
 export TOKENIZERS_PARALLELISM=false
-# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
-# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping.
+# Offline server: models/data come from the download.txt mirrors; no HF Hub access, no vLLM usage stats.
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1

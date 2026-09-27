@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Records for one track: the teacher's rendering (--style thinking, its own chat template) and the student's
-# training text (--style sgl, byte-identical to the SGL/P-ALIGN/SSFT baselines' format), for train and held-out,
-# plus anchor labels (Appendix B) and the 13-gram decontamination report. Records are shared across tracks
-# that use the same (data, model, style), e.g. Qwen3-8B/thinking in read-q8b-1.7b and Qwen3-8B/sgl in read-d32b-q8b.
+# Records for one track: teacher rendering (thinking) and student SGL text for train and held-out, anchor labels,
+# and the 13-gram decontamination report.
 # Usage: scripts/data/records.sh TRACK        (SEGMENT_MODE=sentence|episode|chunk3 for ablation A9)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../common.sh" "${1:-}"
@@ -10,7 +8,7 @@ LABELER="${LABELER:-heuristic}"   # heuristic | llm (Qwen3-8B, the proposal's pr
 
 prep() {  # prep CANON MODEL_DIR STYLE
   local out; out="$(records_path "$1" "$2" "$3")"
-  # skip only a finished file: prepared *and* anchor-labelled (else D2 / CSRD-A would silently see no anchors)
+  # skip only anchor-labelled files, else D2 / CSRD-A would silently see no anchors
   if [[ -s "${out}" ]] && head -1 "${out}" | grep -q '"anchor"'; then echo "skip ${out} (exists)"; return; fi
   python src/data_prep.py --canonical "data/canonical/$1.jsonl" --tokenizer "${LOCAL_MODELS_ROOT}/$2" --style "$3" \
     --segment-mode "${SEGMENT_MODE}" --min-step-chars 40 --max-steps 400 --max-tokens 32768 --output-path "${out}" \
@@ -22,8 +20,7 @@ prep() {  # prep CANON MODEL_DIR STYLE
 for canon in "${TRAIN_CANON}" "${HELDOUT_CANON}"; do
   prep "${canon}" "${TEACHER_DIR}" thinking
   prep "${canon}" "${STUDENT_DIR}" sgl
-  # The student may only train on traces the teacher has signals for: a trace near 32k tokens can pass the
-  # length filter under one tokenizer/template and not the other. Keep the intersection on the student side.
+  # Near 32k tokens the length filter can differ by tokenizer: keep only student traces the teacher also has.
   python - "$(records_path "${canon}" "${TEACHER_DIR}" thinking)" "$(records_path "${canon}" "${STUDENT_DIR}" sgl)" <<'PY'
 import json, sys
 teacher, student = sys.argv[1:]

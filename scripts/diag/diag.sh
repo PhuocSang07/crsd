@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Student diagnostics D1/D2/D4/D5/D6 on the track's held-out traces (teacher-forced), for one checkpoint.
-# The student reads its own rendering (--style sgl), the teacher its own (--style thinking); rows are matched by
-# node hashes. Student heads use the same receiver score, calibrated on the same D_cal as the teacher (first 200
-# train traces). D6 re-reads the held-out traces with the q/k LoRA update zeroed on the *same* heads; its pass@1
-# comes from evaluating qk_restore.py's adapter. D3 runs when results-proposal/<TAG>/dev-rollouts.jsonl exists.
+# Student diagnostics D1/D2/D4/D5/D6 on the track's held-out traces for one checkpoint, rows matched to the teacher
+# by node hashes; D3 runs when results-proposal/<TAG>/dev-rollouts.jsonl exists.
 # Usage: scripts/diag/diag.sh TRACK CKPT TAG        (CKPT = adapter dir, merged CSRD-QK dir, or "base")
 set -euo pipefail
 CKPT="${2:?checkpoint dir (or 'base')}"
@@ -58,7 +55,7 @@ if [[ -n "${RESTORE_OPTS}" ]]; then
     --records "${STUDENT_HELDOUT_RECORDS}" --output-dir "${OUT}-qkrestore" --d-min ${D_MIN} 2>&1 | tee "logs/diag-${TAG}-qkrestore.log"
 fi
 
-# D3: teacher-forcing on the student's own dev rollouts (truncated rollouts kept, without an answer node)
+# D3: teacher-forcing on the student's own dev rollouts
 ROLLOUTS="results-proposal/${TAG}/dev-rollouts.jsonl"
 if [[ -f "${ROLLOUTS}" ]]; then
   D3="${OUT}-d3"
@@ -68,7 +65,6 @@ if [[ -f "${ROLLOUTS}" ]]; then
   python src/data_prep.py --canonical "${D3}/canonical.jsonl" --tokenizer "${STUDENT}" --style sgl --allow-unclosed \
     --segment-mode "${SEGMENT_MODE}" --output-path "${D3}/student.jsonl"
   DEVICE_OPTS=(); [[ "${TEACHER_GPUS}" -gt 1 ]] && DEVICE_OPTS=(--device-map auto)
-  # ~800 rollouts: shard the teacher reading over every GPU group
   sharded "d3-teacher-${TAG}" python -u src/extract_routing.py --stage targets --model-name "${TEACHER}" "${DEVICE_OPTS[@]}" \
     --data-path "${D3}/teacher.jsonl" --heads-json "${TEACHER_WORK}/routing/heads-${SCORE}.json" --output-dir "${D3}/teacher-targets" --d-min ${D_MIN}
   python -u src/extract_routing.py --stage targets --model-name "${MODEL}" ${ADAPTER_OPTS} --data-path "${D3}/student.jsonl" \

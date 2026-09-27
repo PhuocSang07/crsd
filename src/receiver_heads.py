@@ -1,12 +1,10 @@
 """Receiver-head scoring and selection (proposal Sec. 4.3).
 
-Vertical score of node j at head (l, h): nu_j = E_{i : i - j >= d_min} R[i, j] -- how much the steps
-far after j read it back. A receiver head concentrates nu on a few nodes, measured by kurtosis over
-j. Two scores:
+Vertical score of node j at head (l, h): nu_j = E_{i : i - j >= d_min} R[i, j]. A receiver head
+concentrates nu on a few nodes, measured by kurtosis over j:
     "kurtosis"     raw Pearson kurtosis of nu_j (Bogdan et al., 2025)
-    "excess_bg"    (default) subtract the mean vertical profile over *all* heads of the model first,
-                   then Fisher (excess) kurtosis -- removes patterns every head shares, like the
-                   attention sink (Hiding in Plain Sight, 2026)
+    "excess_bg"    (default) Fisher kurtosis after subtracting the mean profile over all heads, which
+                   removes patterns every head shares, like the attention sink (Hiding in Plain Sight, 2026)
 Scores are averaged over a calibration set; the top K heads of each relative-depth band are kept.
 """
 
@@ -75,11 +73,8 @@ def select_heads(mean_scores: np.ndarray, k_per_band: int, bands=DEPTH_BANDS) ->
 
 
 def split_half_stability(per_trace: np.ndarray, k_per_band: int, bands=DEPTH_BANDS, seed: int = 0) -> dict:
-    """Reliability of the selection: random half/half split of the calibration traces.
-
-    Reports the Spearman correlation of the two halves' head scores (Bogdan et al. report r=.67)
-    and, per band, the overlap |top-k(A) & top-k(B)| / k.
-    """
+    """Random half/half split of the calibration traces -> Spearman r of the halves' head scores
+    and, per band, the overlap |top-k(A) & top-k(B)| / k."""
     from scipy.stats import spearmanr
 
     if per_trace.shape[0] < 4:

@@ -1,11 +1,8 @@
 """Training dataset and collator: SFT fields plus, per sample, the CSRD routing targets.
 
-A record (data_prep.py --style sgl, student tokenizer) supplies input_ids, the response span and the
-node token spans; the teacher signals come from a signal bank or a targets dir (signal_bank.SignalSource),
-optionally with a causal dir. The node hashes stored with the signals must equal the record's -- the
-check that teacher rows and student rows are the same steps, whatever tokenizer each side used.
-
-The SFT arm uses the same dataset without targets, so both arms read identical samples.
+Records (data_prep.py --style sgl, student tokenizer) give input_ids, the response span and node token
+spans; teacher signals come from signal_bank.SignalSource. Signal and record node hashes must match, so
+teacher and student rows are the same steps. The SFT arm uses the same dataset without targets.
 """
 
 from dataclasses import dataclass
@@ -33,8 +30,7 @@ class CSRDDataset(Dataset):
                 print(f"--max-seq-len {max_seq_len}: dropped {before - len(self.records)}/{before} samples")
         self.signals = SignalSource(signals, causal_dir) if signals else None
         if self.signals is not None:
-            # Fail instead of dropping: the SFT arm would keep those records, and the arms must see the same
-            # samples (Sec. 6.3 "cùng số token đã thấy"). Rerun extract_routing.py --stage targets (it resumes).
+            # Fail instead of dropping: the SFT arm keeps every record and both arms must see the same samples.
             available = set(self.signals.ids())
             missing = [r["id"] for r in self.records if r["id"] not in available]
             if missing:

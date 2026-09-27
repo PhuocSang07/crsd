@@ -1,18 +1,12 @@
 """Step nodes on character spans (proposal Sec. 4.1, Appendix B).
 
-A sample's node set is V = {v0 = q, v1..vn = steps of the thinking part, v_{n+1} = a}; every node
-is a half-open character span [beta, eps) of one model's full text prompt + response, plus the hash
-of its text. Nodes are cut from the trace *content*, so teacher and student always get the same n
-nodes (same hashes) regardless of tokenizer or chat template; each model maps them onto its own
-tokens via offset mapping:
+Nodes V = {q, s1..sn, a} are half-open character spans [beta, eps) of prompt + response, cut from the
+trace content so teacher and student get the same nodes (and text hashes) under any tokenizer; each
+model maps them onto its tokens: I_M(v_k) = {t : first character of token t in [beta_k, eps_k)}.
 
-    I_M(v_k) = {t : first character of token t in [beta_k, eps_k)}
-
-Default segmentation (A9 "paragraph"): split the thinking text at "\\n\\n" (the separator stays
-with the step before it, so reflection words like "Wait" open a step), merge pieces shorter than
-40 characters into the previous one, and while n > 400 merge the adjacent pair with the smallest
-combined length. The other A9 modes are "sentence", "episode" (a new step only at a paragraph
-opening with a reflection keyword) and "chunk3" (three default steps per node).
+A9 segmentation modes: "paragraph" (default: split at blank lines, separator stays with the previous
+step, merge pieces < 40 chars, cap at 400 steps), "sentence", "episode" (new step only at a paragraph
+opening with a reflection keyword), "chunk3" (three paragraph steps per node).
 """
 
 import bisect
@@ -106,13 +100,9 @@ def build_nodes(
     min_chars: int = MIN_STEP_CHARS,
     max_steps: int = MAX_STEPS,
 ) -> list[dict]:
-    """Nodes [q, s1..sn, a] of a rendered trace (prompting.render) as absolute character spans in
-    prompt + response, each with the hash of its text.
+    """Nodes [q, s1..sn, a] of a rendered trace (prompting.render) as absolute character spans + text hash.
 
-    q is the user content, s1..sn the steps of the thinking text, a the answer text; template tokens and
-    <think> markers belong to no node. A truncated rollout (no answer) has no answer node. Because nodes
-    come from the *content*, two renderings of one trace (teacher and student, any tokenizer or
-    template) produce the same node texts and hashes.
+    Template tokens and <think> markers belong to no node; a truncated rollout has no answer node.
     """
     prompt, response = rendered["prompt"], rendered["response"]
     base = len(prompt)
@@ -133,8 +123,7 @@ def build_nodes(
 def assign_token_spans(nodes: list[dict], token_starts: list[int]) -> list[tuple[int, int]] | None:
     """Token range [start, end) of every node: tokens whose first character falls in its span.
 
-    token_starts must be non-decreasing (one tokenizer pass per segment, shifted to absolute
-    character positions). Returns None if any node would own no token.
+    token_starts must be non-decreasing absolute character offsets. None if any node owns no token.
     """
     spans = []
     for node in nodes:

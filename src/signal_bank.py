@@ -2,22 +2,17 @@
 
     python src/signal_bank.py pack --targets-dir T [--causal-dir C] --output signals/<name>.safetensors
     python src/signal_bank.py info signals/<name>.safetensors
-    python src/signal_bank.py heads signals/<name>.safetensors <heads.json>   # the teacher head selection
+    python src/signal_bank.py heads signals/<name>.safetensors <heads.json>
 
-Signals are keyed by trace id and by node *text hashes*, not by token positions, so a bank written once
-by an expensive teacher (e.g. DeepSeek-R1-Distill-Qwen-32B) serves any later student, whatever its
-tokenizer or chat template: the student's own records (data_prep.py --style sgl) only have to carry
-the same node hashes. Per trace:
+Keyed by trace id and node text hashes (not token positions), so one bank serves any student tokenizer
+whose records (data_prep.py --style sgl) carry the same node hashes. Per trace:
 
     <id>/P      float32 [bands, N, N]  band-averaged far routing (rows over F(i), lower triangular)
     <id>/Z      float32 [bands, N]     far mass
     <id>/rows   uint8   [N]            rows with |F(i)| >= 2
     <id>/hash   int64   [N]            node text hashes (prompting.text_hash)
     <id>/C, <id>/J, <id>/floor         causal targets, when the trace is in the causal subset
-The header metadata holds the teacher, source, style, segmentation, d_min, receiver score and head list.
-
-`SignalSource` reads either a packed bank or the per-trace .npz directories the extraction writes
-(resumable, shardable), with the same interface.
+Header metadata: teacher, source, style, segmentation, d_min, receiver score, head list.
 """
 
 import argparse
@@ -33,7 +28,7 @@ FORMAT = "crsd-signal-bank/1"
 
 
 class SignalSource:
-    """ids() / get(id) over a packed .safetensors bank or a targets dir (+ optional causal dir)."""
+    """ids() / get(id) over a packed .safetensors bank or a per-trace .npz targets dir (+ optional causal dir)."""
 
     def __init__(self, path: str, causal_dir: str | None = None):
         self.path = Path(path)

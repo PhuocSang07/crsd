@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# gen-* tracks only (Sec. 6.2): the teacher writes its own traces, one vLLM process per GPU group
-# (tensor parallel over TEACHER_GPUS: 2 for the 32B teacher). Two sets:
-#   s1k      8 traces per s1K question -> keep closed, untruncated, correct ones -> one per question (G0 >= 600)
-#   heldout  MATH-train L3-5 minus the dev set and anything 13-gram-close to s1K/tests -> 300 correct traces
-# Correctness: math-verify, else Qwen3-8B as a non-thinking LLM judge.
+# gen-* tracks only: the teacher writes its own traces, one vLLM process per GPU group. s1k: 8 per question, one
+# correct kept per question (G0 >= 600); heldout: 300 correct MATH-train traces. Judge: math-verify, else Qwen3-8B.
 # Usage: scripts/gen/gen_traces.sh gen-q8b-1.7b|gen-d32b-q8b     (LIMIT=20 for a dry run)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../common.sh" "${1:-}"

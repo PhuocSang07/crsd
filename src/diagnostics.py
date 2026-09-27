@@ -1,19 +1,17 @@
-"""Diagnostic protocol D1-D5 and pilot gates G1-G4 (proposal Sec. 5 and Table 6).
+"""Diagnostics D1-D5 and pilot gates G1-G4 (proposal Sec. 5, Table 6).
 
-Everything is teacher-forced on one text: --teacher-targets and --student-targets are
-extract_routing.py outputs over the *same* records (held-out teacher traces for D1/D2/D4, student
-rollouts on the dev set for D3), so P_i and Q_i correspond row by row.
+--teacher-targets and --student-targets are extract_routing.py outputs over the same records
+(held-out teacher traces for D1/D2/D4, student dev rollouts for D3), so P_i and Q_i match row by row.
 
-    D1  distance profile: RG(b), Delta-mu(b) per bin, slope over log distance, RG(>=64)/RG([4,8)),
-        trace-level bootstrap CIs                                             -> G1, Hypothesis 1
-    D2  anchor rows vs computation rows (paired sign-flip test over traces), target-side gap,
-        nDCG@k of the student's vertical-score ranking against the teacher's  -> G2, Hypothesis 2
-    D3  error prediction on student rollouts: logistic regression "wrong answer" on length, NLL and
-        reflection-marker count, with and without the routing gap; CV AUC gain  -> G3, Hypothesis 3
-    D4  attention-causal agreement: median Spearman(P_i, C~_i) per band (and per head if saved) -> G4
-    D5  LoRA update norms of W_Q/W_K vs W_V/W_O per layer; mean attention distance of the heads
-D6 (QK-Restore) is D1 again on targets extracted with --qk-restore, plus evaluate.py on the
-qk_restore.py adapter.
+    D1  RG(b), Delta-mu(b) per distance bin, slope over log distance, trace bootstrap CIs
+        G1: RG(>=64)/RG([4,8)) >= 1.5 with CI above 1, or Delta-mu(>=32) CI below 0
+    D2  anchor vs computation rows (one-sided sign-flip test), target-side gap, nDCG@k of vertical scores
+        G2: row or target test p < 0.05
+    D3  CV AUC of "wrong answer" from length, NLL, reflection markers, without vs with the routing gap
+        G3: AUC gain >= 0.03
+    D4  median Spearman(P_i, C~_i) per band (and per head if saved)   G4: band-avg median >= 0.3
+    D5  LoRA W_Q/W_K vs W_V/W_O update norms per layer; mean attention distance before/after
+D6 (QK-Restore) = D1 on targets extracted with --qk-restore.
 """
 
 import argparse
@@ -32,7 +30,7 @@ from signal_bank import SignalSource
 
 REFLECTION_MARKERS = re.compile(r"\b(wait|hmm|alternatively|let me (?:check|verify|double[- ]check)|actually|but let me)\b", re.I)
 BIN_NAMES = ["[4,8)", "[8,16)", "[16,32)", "[32,64)", "[64,inf)"]
-# geometric bin centres for the slope over log distance; the open bin uses sqrt(64 * 128)
+# geometric bin centres for the log-distance slope; the open bin uses sqrt(64 * 128)
 BIN_CENTRES = [math.sqrt(4 * 8), math.sqrt(8 * 16), math.sqrt(16 * 32), math.sqrt(32 * 64), math.sqrt(64 * 128)]
 
 
@@ -80,8 +78,7 @@ def _profile(sums: np.ndarray, counts: np.ndarray) -> np.ndarray:
 def _summaries(rg: np.ndarray, dmu_sums: np.ndarray, dmu_counts: np.ndarray) -> dict:
     valid = np.isfinite(rg)
     slope = np.polyfit(np.log(np.asarray(BIN_CENTRES)[valid]), rg[valid], 1)[0] if valid.sum() >= 2 else np.nan
-    # Delta-mu(>=32) sums a row's mass deficit over both far bins; a row with a target at distance
-    # >= 64 always has targets in [32, 64) too, so the [32, 64) row count is the number of rows.
+    # A row with a target at >= 64 always has targets in [32, 64), so that bin's row count = far rows.
     far_rows = dmu_counts[:, 3].sum()
     return {
         "slope_log_distance": float(slope),
@@ -122,8 +119,7 @@ def d1_distance_profile(pairs: list[dict], resamples: int, seed: int, d_min: int
 
 
 def gate_g1(d1: dict, view: str = "avg") -> dict:
-    """G1: RG(>=64)/RG([4,8)) >= 1.5 with a CI excluding 1, or Delta-mu(>=32) < 0 significantly.
-    Also reports Hypothesis 1's falsification test (slope CI contains 0, or ratio < 1.2)."""
+    """G1, plus Hypothesis 1's falsification test (slope CI contains 0, or ratio < 1.2)."""
     r = d1[view]
     ratio_ok = r["ratio_64_over_4"] >= 1.5 and r["ratio_64_over_4_ci"][0] > 1.0
     dmu_ok = r["dmu_ge32_ci"][1] < 0
@@ -287,9 +283,7 @@ def d5_lora_norms(adapter_dir: Path) -> dict:
 
 
 def d5_attention_distance(before: Path | None, after: Path) -> dict:
-    """Mean attention distance of *every* head (routing/mean-distance.npy from the calibrate stage), before vs
-    after training, per layer and averaged over the heads of each depth band. The mean runs over the query
-    tokens of rows with |F(i)| >= 2 (the tokens every routing quantity is defined on)."""
+    """Mean attention distance of every head (calibrate-stage mean-distance.npy), before vs after, per layer and band."""
     from receiver_heads import band_layers
 
     def load(path):

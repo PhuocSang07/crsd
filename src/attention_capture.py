@@ -1,16 +1,11 @@
 """Access to the exact q/k a HF decoder attends with, without giving up SDPA/FlashAttention.
 
-transformers dispatches every attention layer through the global AttentionInterface
-(`ALL_ATTENTION_FUNCTIONS[config._attn_implementation]`). `install()` replaces the sdpa and
-flash-attention entries with a thin wrapper that, for a module carrying a hook in CALLBACK_ATTR,
-first calls `hook(module, query, key, value, attention_mask, **kwargs)`:
+`install()` wraps the sdpa/flash-attention entries of transformers' AttentionInterface; for a module
+carrying a hook in CALLBACK_ATTR the wrapper first calls `hook(module, query, key, value, attention_mask, **kwargs)`:
     query [B, H, T, d]   post q_norm + RoPE (what the softmax actually sees)
     key   [B, KVH, T, d] post k_norm + RoPE, before GQA repetition
-A hook returning None lets the normal kernel run (capture); returning (attn_output, None) replaces
-it (attention suppression for causal targets). Modules without a hook pay one getattr.
-
-Attention masks keep working because the registry *names* (and so the mask builders keyed on
-them) are unchanged.
+Returning None runs the normal kernel (capture); returning (attn_output, None) replaces it (suppression).
+Registry names are unchanged, so the mask builders keyed on them keep working.
 """
 
 import sys
@@ -81,18 +76,14 @@ def check_attn_implementation(model) -> None:
 
 
 class QKCapture:
-    """Armed for exactly one forward: keeps q and k of the wanted layers, then slices them.
+    """Armed for one forward: keeps q and k of the wanted layers; disarm() slices them into
+    `q[layer]` [Hsel, Nq, d] (selected heads at `query_positions`, sample `batch_index`) and
+    `k[layer]` [Hsel, T, d] (matching KV head), with their graph unless `detach=True`.
 
-    After the forward, `q[layer]` is [Hsel, Nq, d] (selected query heads at `query_positions`, sample
-    `batch_index`) and `k[layer]` is [Hsel, T, d] (the KV head matching each selected query head),
-    with their graph unless `detach=True`.
-
-    The hook itself runs *no* tensor op, it only keeps references: an op inside a decoder layer
-    under non-reentrant gradient checkpointing would save tensors in the original forward but not
-    in the (disarmed) recomputation, and checkpointing rejects the mismatch. Slicing happens in
-    `disarm()`, outside the checkpointed region; backprop through the kept tensors then triggers
-    the usual recomputation. Disarms each layer after its first capture, so the re-forward in
-    backward neither overwrites nor duplicates anything.
+    The hook only keeps references and slicing waits for disarm(), outside the checkpointed region:
+    a tensor op inside a layer under non-reentrant gradient checkpointing would be saved in the
+    forward but not in the (disarmed) recomputation, which checkpointing rejects. Each layer disarms
+    after its first capture, so the backward re-forward neither overwrites nor duplicates anything.
     """
 
     def __init__(self, modules: dict[int, torch.nn.Module]):
@@ -139,12 +130,8 @@ class QKCapture:
 
 
 def suppression_hook(blocked_start: int, blocked_end: int, query_block: int = 2048):
-    """Attention suppression of one node (Sec. 4.4): queries at positions >= blocked_end see no key
-    in [blocked_start, blocked_end). Earlier queries (inside or before the node) are unchanged.
-
-    Computes attention itself (SDPA with an explicit boolean mask per query block), so it works
-    under any wrapped kernel; returns [B, T, H, d] like the transformers kernels.
-    """
+    """Attention suppression of one node (Sec. 4.4): queries at >= blocked_end see no key in
+    [blocked_start, blocked_end). Masked SDPA per query block; returns [B, T, H, d] like the kernels."""
 
     def hook(module, query, key, value, attention_mask, **kwargs):
         batch, heads, length, dim = query.shape
@@ -170,12 +157,8 @@ def suppression_hook(blocked_start: int, blocked_end: int, query_block: int = 20
 
 
 def recompute_qk(module: torch.nn.Module, hidden: torch.Tensor, position_embeddings) -> tuple[torch.Tensor, torch.Tensor]:
-    """q, k of one Qwen3/Llama-style attention module from its (possibly detached) input.
-
-    CSRD-QK routes the routing-loss gradient into the Q/K adapter of the *same* layer only: the
-    hidden state entering q_proj/k_proj is detached, so nothing flows into lower layers.
-    Returns q [B, H, T, d], k [B, KVH, T, d], post-norm and post-RoPE.
-    """
+    """q [B, H, T, d], k [B, KVH, T, d] (post-norm, post-RoPE) of one Qwen3/Llama-style attention
+    module from its (possibly detached) input; CSRD-QK detaches it so no gradient reaches lower layers."""
     rope = getattr(sys.modules[type(module).__module__], "apply_rotary_pos_emb")
     shape = (*hidden.shape[:-1], -1, module.head_dim)
     q = module.q_proj(hidden).view(shape)
@@ -187,8 +170,7 @@ def recompute_qk(module: torch.nn.Module, hidden: torch.Tensor, position_embeddi
 
 
 class AttentionInputCapture:
-    """Forward pre-hooks storing (hidden_states, position_embeddings) of selected attention modules
-    for one forward (CSRD-QK recomputes q/k from them)."""
+    """Pre-hooks storing detached (hidden_states, position_embeddings) of armed layers for one forward (CSRD-QK)."""
 
     def __init__(self, modules: dict[int, torch.nn.Module]):
         self.modules = modules

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Error injection (Sec. 6.7, Appendix C) for one student checkpoint: ~100 cases (34 per first-reuse bucket
-# [4,16), [16,64), [64,inf)) built once per track from the held-out traces in the student's own format, each with
-# a clean control; 4 continuations per case, up to 16k tokens within the 32k context.
+# Error injection for one student checkpoint: ~100 held-out cases with clean controls (built once per track),
+# 4 continuations per case, up to 16k tokens.
 # Usage: scripts/inject/inject.sh TRACK CKPT TAG
 set -euo pipefail
 CKPT="${2:?checkpoint dir}"

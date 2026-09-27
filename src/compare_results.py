@@ -2,11 +2,9 @@
 
     python src/compare_results.py --results-dir results-proposal --track read-d32b-q8b
 
-Tags are "<arm>-<track>[-s<seed>]"; runs differing only in the seed suffix are pooled. Every arm
-is compared with --baseline (same track): per-benchmark deltas, gate G5 (mean pass@1 +1.5 points
-over SFT; the error-detection alternative of G5 comes from error_injection.py), and a paired
-permutation test at the problem level (per-problem pass@1 averaged over seeds, all benchmarks
-pooled) with Holm-Bonferroni correction across arms (Sec. 6.4).
+Tags "<arm>-<track>[-s<seed>]" are pooled over seeds; every arm is compared with --baseline:
+per-benchmark deltas, G5 accuracy (mean pass@1 >= +1.5 pp over SFT), and a problem-level paired
+permutation test (all benchmarks pooled) with Holm correction over the CSRD arms (Sec. 6.4).
 """
 
 import argparse
@@ -49,8 +47,7 @@ def per_problem_pass1(results_dir: Path, arm: str, benchmarks: list[str]) -> dic
 
 
 def significance(results_dir: Path, runs, baseline: str, family: str) -> dict[str, dict]:
-    """Paired tests of every arm vs the baseline; Holm correction over the arms matching `family` only
-    (the CSRD interventions), so reference rows (B0, QK-Restore, other baselines) don't inflate it."""
+    """Paired tests of every arm vs the baseline; Holm correction only over arms matching `family`."""
     benchmarks = [b for b in BENCHMARK_ORDER if any(b in r for r in runs.values())]
     base = per_problem_pass1(results_dir, baseline, benchmarks)
     raw_p, deltas = {}, {}
@@ -72,7 +69,6 @@ def significance(results_dir: Path, runs, baseline: str, family: str) -> dict[st
 
 def cell(rows: list[dict], metric: str) -> tuple[float, float] | None:
     values = [r[metric] for r in rows if metric in r]
-    # sample std (ddof=1) over seeds; a single seed has none
     return (float(np.mean(values)), float(np.std(values, ddof=1)) if len(values) > 1 else 0.0) if values else None
 
 

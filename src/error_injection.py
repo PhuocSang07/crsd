@@ -1,17 +1,13 @@
 """Distance-controlled error injection (proposal Sec. 6.7, Appendix C).
 
-    --stage build     from correct held-out traces, rendered as the *student* reads them (data_prep.py
-                      --style sgl records, so the student continues its own training format): a number r
-                      introduced in step j, absent from
-                      steps j+1..j+2 and first reused at step i with i - j in [4,16), [16,64) or [64,inf)
-                      (d in {4, 16, 64}), is corrupted in step j only (r +- 1, r x 10 or r / 10, sign flip);
-                      the prefix is cut after step j + 2. Each case has a control twin (clean prefix).
-    --stage generate  the student continues every prefix with vLLM (4 samples, T=0.6, up to 16k tokens,
-                      capped by the context left after the prefix)
-    --stage score     detection: the continuation recomputes and states the original value r (reported
-                      net of the control's base rate of stating r); recovery: the final answer is correct.
-                      By distance bucket and corruption kind; controls give the base re-check/recovery.
-Detection is a numeric string match here; the proposal adds an LLM-judge rubric on top.
+    --stage build     on correct held-out --style sgl records: a number r introduced in step j, absent from
+                      steps j+1..j+2 and first reused at gap i - j in [4,16), [16,64) or [64,inf), is
+                      corrupted in step j only (r +- 1, r x 10 or r / 10, sign flip); prefix cut after step j + 2;
+                      each case has a clean-prefix control twin
+    --stage generate  the student continues every prefix with vLLM (4 samples, T=0.6, up to 16k tokens)
+    --stage score     detection = continuation states the original r (net of the control rate);
+                      recovery = final answer correct; by distance bucket and corruption kind
+Detection is a numeric string match; the proposal adds an LLM-judge rubric on top.
 """
 
 import argparse
@@ -56,12 +52,9 @@ def distance_bucket(gap: int) -> int | None:
 
 
 def build(records: list[dict], per_distance: int, seed: int) -> list[dict]:
-    """Injected/control case pairs, `per_distance` pairs per distance bucket.
+    """Injected/control case pairs, `per_distance` pairs per distance bucket (gap to r's first reuse).
 
-    A candidate value r is introduced in step j (absent from the question and every earlier step) and
-    reused later; its bucket is the gap to its *first* reuse, so each case sits in exactly one of
-    [4,16), [16,64), [64,inf). r must not occur in steps j+1..j+2: those stay in the prefix, and a
-    detection metric that looks for r in the continuation could then be passed by copying.
+    r must not occur in steps j+1..j+2 (kept in the prefix), or detection could be passed by copying.
     """
     rng = random.Random(seed)
     by_distance = defaultdict(list)
@@ -108,9 +101,7 @@ def build(records: list[dict], per_distance: int, seed: int) -> list[dict]:
 
 
 def generate(cases: list[dict], args) -> list[dict]:
-    """Continue every prefix; each request gets max_tokens = min(--max-tokens, context left after its
-    prompt), and cases leaving less than --min-new-tokens are dropped (reported), since the student's
-    context is 32,768 tokens and a prefix cut after step j + 2 can already be long."""
+    """Continue every prefix with max_tokens = min(--max-tokens, context left); drop cases under --min-new-tokens."""
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
     from vllm.lora.request import LoRARequest
@@ -137,11 +128,10 @@ def generate(cases: list[dict], args) -> list[dict]:
 
 
 def score(cases: list[dict]) -> dict:
-    """Rates per (group, distance) and per (injected, distance, kind), plus the net detection.
+    """Rates per (group, distance) and per (injected, distance, kind).
 
-    "states_r": the continuation writes the original value r. On injected cases r appears nowhere in the
-    prefix, so writing it means recomputing it (detection); on controls r *is* in the prefix, so the rate
-    is the base rate of restating it. `detection_net` = injected minus control, per distance and overall.
+    states_r = continuation writes the original r: recomputation on injected cases (r is absent from the
+    prefix), base restating rate on controls; detection_net = injected minus control.
     """
     groups = defaultdict(lambda: defaultdict(list))
     for case in cases:

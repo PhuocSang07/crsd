@@ -1,15 +1,11 @@
 """Render canonical traces for one model and map the step nodes onto its tokens.
 
-Input: canonical JSONL (build_canonical.py). Output: one record per trace with
-
-    input_ids               prompt ids + response ids + the tokenizer's eos token (SGL convention)
-    response_token_span     [start, end) of the response (supervised, together with the eos token)
+Output: one record per trace with
+    input_ids               prompt ids + response ids + eos (tokenized separately, as SGL trains)
+    response_token_span     [start, end) of the response (supervised together with the eos token)
     nodes                   [{kind, char_start, char_end, token_start, token_end, hash}], v0 = q ... v_{n+1} = a
 
---style sgl renders the student's training text exactly as SpectralGuidedLearning/data_prep.py does
-(the baselines' format); --style thinking renders how a teacher reads a trace as its own reasoning.
-Prompt and response are tokenized separately and concatenated, as the student is trained. Node hashes
-are what matches a teacher's routing signals to any student's records.
+--style sgl = the student's training text (SGL data_prep.py format); --style thinking = a teacher's reading.
 """
 
 import argparse

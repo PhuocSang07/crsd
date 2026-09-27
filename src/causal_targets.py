@@ -1,14 +1,10 @@
 """Causal routing targets by attention suppression (proposal Sec. 4.4, Eq. 3).
 
-For a target node j, every position after v_j is blocked from attending to the tokens of v_j at
-every layer, and the teacher's next-token distributions are compared with the clean run:
-
     C[i, j] = (1 / |I(v_i)|) sum_{t in I(v_i)} KL( p_T(. | x_<t) || p_T^{not j}(. | x_<t) )
 
-One suppressed forward gives the whole column C[., j], so a trace costs |J| + 1 forwards with J the
-top-24 nodes by (band-averaged) teacher vertical score. Run on a seeded subset (default 20% of the
-traces, Table 3). Writes <output-dir>/<id>.npz with C [N, N] (NaN outside J) and J; the row
-normalization over F(i) & J happens where it is used, so d_min stays a free choice.
+where p^{not j} blocks every later position from attending to v_j at every layer. One suppressed forward
+per target, J = top-24 nodes by teacher vertical score, on a seeded 20% subset (Table 3). Writes
+<output-dir>/<id>.npz with C [N, N] (NaN outside J), J and floor; row normalization happens at use.
 """
 
 import argparse
@@ -65,10 +61,11 @@ def hidden_with_suppression(model, modules, input_ids, start: int, end: int, que
 
 
 def causal_matrix(model, record: dict, targets: np.ndarray, query_block: int) -> tuple[np.ndarray, np.ndarray]:
-    """(C [N, N], floor [|J|]). The clean run goes through the same explicit-mask attention path with an
-    empty block, so clean and suppressed runs differ only by the suppression (the stock SDPA/flash kernel
-    would add a bf16 kernel-mismatch KL to every position). `floor` is the mean KL over positions before
-    node j -- which suppression cannot affect -- and must be ~0."""
+    """(C [N, N], floor [|J|]); floor = mean KL before node j, which must be ~0.
+
+    The clean run uses the same explicit-mask path with an empty block, so it differs from the suppressed
+    run only by the suppression (the stock SDPA kernel would add a bf16 mismatch KL everywhere).
+    """
     input_ids = torch.tensor([record["input_ids"]], device=next(model.parameters()).device)
     spans = [(n["token_start"], n["token_end"]) for n in record["nodes"]]
     num_nodes, length = len(spans), input_ids.size(1)

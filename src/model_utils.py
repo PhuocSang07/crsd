@@ -12,10 +12,8 @@ def load_causal_lm(model_name: str, adapter: str | None = None, qk_restore: bool
                    attn_implementation: str = "sdpa", device: str | None = None, device_map: str | None = None):
     """Frozen bf16 (fp32 on CPU) causal LM for teacher-forced reading, adapter merged if given.
 
-    qk_restore zeroes the LoRA update of q_proj/k_proj before merging: the model then routes
-    with the *pre-training* W_Q, W_K while keeping every other learned update (Zhou et al., 2026).
-    device_map="auto" spreads a teacher too large for one GPU (DeepSeek-R1-Distill-Qwen-32B at 32k
-    tokens) over the visible GPUs; the attention hooks follow each layer's device.
+    qk_restore zeroes the q_proj/k_proj LoRA update before merging (routes with the pre-training W_Q, W_K).
+    device_map="auto" spreads a teacher too large for one GPU over the visible GPUs.
     """
     from transformers import AutoModelForCausalLM
 

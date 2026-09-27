@@ -6,10 +6,8 @@ For a head (l, h) and a query token t of step i (Definition 1):
     F(i)    = {0} U {j : 1 <= j <= i - d_min}              far targets of step i
     Z_t     = sum_{j in F(i)} m_t(j),   R_t(j) = m_t(j) / Z_t   (j in F(i))
 
-Rows average *already normalized* per-query distributions, R[i] = mean_{t in Q(i)} R_t, which is
-what makes Lemma 1 exact per query. Only rows with |F(i)| >= 2 enter any loss.
-
-Framework-agnostic torch (no model, no Trainer) so every formula is unit-testable on CPU.
+Rows average *already normalized* per-query distributions, R[i] = mean_{t in Q(i)} R_t (Lemma 1 exact
+per query). Only rows with |F(i)| >= 2 enter any loss. Plain torch, no model or Trainer.
 """
 
 import math
@@ -72,9 +70,8 @@ def attention_probs(
 ) -> torch.Tensor:
     """Exact causal softmax(q k^T * scale) of queries [..., Nq, d] over all keys [..., T, d], fp32.
 
-    Autocast is switched off: the warmup head statistics run inside the model forward, which
-    accelerate wraps in bf16 autocast, and a bf16 q k^T would round the logits more coarsely than
-    the attention kernel itself (bf16 inputs, fp32 accumulation) does.
+    Autocast is off: warmup head statistics run inside the bf16-autocast forward, and a bf16 q k^T
+    would round the logits more coarsely than the attention kernel (fp32 accumulation) does.
     """
     with torch.autocast(device_type=q.device.type, enabled=False):
         scores = (_full(q) @ _full(k).transpose(-1, -2)) * scale
@@ -100,8 +97,7 @@ def head_query_routing(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """(R_t [Nq, N], Z_t [Nq]) of one head for sampled queries, differentiable in q and k.
 
-    use_checkpoint recomputes the [Nq, T] score matrix in backward instead of storing it, so the
-    student's autograd graph holds only q/k per head (~150 MB/head at 2.4k queries x 32k keys).
+    use_checkpoint recomputes the [Nq, T] score matrix in backward, so the graph holds only q/k per head.
     """
     num_nodes = far_mask.size(0)
     args = (q, k, query_pos, key_nodes, query_rows, far_mask, scale, num_nodes)
@@ -120,13 +116,10 @@ def head_row_routing_blockwise(
     block: int = 1024,
     query_nodes: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    """Teacher-side routing over *every* query token of every row, block by block.
+    """Teacher-side routing over *every* query token of every row (Q(i) = I(v_i), Sec. 4.3), block by block.
 
-    q: [H, T, d] (post-RoPE) and k: [H, T, d] (already matched to the query heads), or [T, d]
-    for a single head; the query set of row i is all of I(v_i) (Sec. 4.3). Never materializes
-    T x T: each block of queries computes its exact full-row softmax, reduces it to node masses
-    and is dropped (peak memory H x block x T fp32). Also returns each head's mean attention
-    distance over those queries (D5: d_h = E_t sum_u (t - u) A_{t,u}).
+    q, k: [H, T, d] (post-RoPE, k matched to the query heads) or [T, d] for one head; peak memory
+    H x block x T fp32. mean_distance is D5: d_h = E_t sum_u (t - u) A_{t,u}.
     Returns R [H, N, N], Z [H, N], counts [N], mean_distance [H] (no H dim for 2-D input).
     """
     single = q.dim() == 2
@@ -256,8 +249,7 @@ def routing_gap_by_bin(
 
     RG(b): mean over rows with |F_b(i)| >= 2 of JS(P_i|F_b || Q_i|F_b).
     Delta-mu(b): mean over rows with |F_b(i)| >= 1 of sum_{j in F_b(i)} (Q_i(j) - P_i(j)).
-    F_b(i) is intersected with F(i) (far_mask), so with d_min > 4 (A1) the nearest bin is simply
-    empty instead of contributing rows where P = Q = 0.
+    F_b(i) is intersected with F(i) (far_mask), so bins nearer than d_min stay empty.
     """
     rows = _bool_rows(rows, P)
     out = []

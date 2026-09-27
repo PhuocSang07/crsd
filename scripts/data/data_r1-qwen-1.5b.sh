@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # Phase 1: data prep (s1K-1.1, read mode) -- DeepSeek-R1-Distill-Qwen-1.5B track, teacher Qwen3-8B.
-#   canonical {question, thinking, answer} from s1K-1.1's DeepSeek-R1 trajectory + attempt (the SGL baselines' data)
-#   -> the teacher's rendering (Qwen3-8B, its own thinking template) and the student's training text
-#      (R1-Distill-Qwen-1.5B, SGL format: byte-identical to SpectralGuidedLearning/src/data_prep.py)
-#   -> both carry the same step nodes (text hashes), which is how the teacher signal bank finds its records.
+# Teacher rendering (thinking) + student SGL text; both share the step nodes the signal bank is keyed on.
 set -euo pipefail
 
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -18,8 +15,7 @@ if [[ -z "${VIRTUAL_ENV:-}" ]]; then
 fi
 export PYTHONPATH="${BASE_PATH}/src"
 export TOKENIZERS_PARALLELISM=false
-# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
-# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping.
+# Offline server: models/data come from the download.txt mirrors; no HF Hub access, no vLLM usage stats.
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -29,7 +25,6 @@ export VLLM_DO_NOT_TRACK=1
 export DO_NOT_TRACK=1
 mkdir -p logs data/canonical data/records
 
-# Offline server: no HF Hub access, load from local mirrors (download.txt).
 LOCAL_MODELS_ROOT="${LOCAL_MODELS_ROOT:-/mnt/local/_models/aiskylimit_new_nothingnew_2}"
 LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-/mnt/local/_data/aiskylimit_new_nothingnew_2}"
 DATASET_NAME="${DATASET_NAME:-${LOCAL_DATA_ROOT}/s1K-1.1}"
@@ -49,14 +44,12 @@ for dir in "${TEACHER_NAME}" "${STUDENT_NAME}"; do
 done
 [[ -s "${CANONICAL_PATH}" || -d "${DATASET_NAME}" ]] || { echo "missing local dataset ${DATASET_NAME} (download.txt)" >&2; exit 1; }
 
-# 1. canonical content
 if [[ ! -s "${CANONICAL_PATH}" ]]; then
   CMD="python ${BASE_PATH}/src/build_canonical.py --source s1k11 --input ${DATASET_NAME} --output-path ${CANONICAL_PATH}"
   echo "${CMD}"
   ${CMD} 2>&1 | tee logs/r1-qwen-1.5b-canonical.log
 fi
 
-# 2. teacher rendering (--style thinking) and student training text (--style sgl), + heuristic anchor labels
 for pair in "${TEACHER_NAME}:thinking:${TEACHER_RECORDS}" "${STUDENT_NAME}:sgl:${STUDENT_RECORDS}"; do
   IFS=: read -r TOKENIZER STYLE OUTPUT_PATH <<< "${pair}"
   if [[ -s "${OUTPUT_PATH}" ]] && head -1 "${OUTPUT_PATH}" | grep -q '"anchor"'; then
@@ -78,8 +71,7 @@ for pair in "${TEACHER_NAME}:thinking:${TEACHER_RECORDS}" "${STUDENT_NAME}:sgl:$
     2>&1 | tee -a "logs/r1-qwen-1.5b-records-$(basename "${OUTPUT_PATH}" .jsonl).log"
 done
 
-# 3. the student trains only on traces the teacher has signals for (a trace near 32k tokens can pass the length
-#    filter under one tokenizer and not the other): keep the id intersection on the student side.
+# Near 32k tokens the length filter can differ by tokenizer: keep only student traces the teacher also has.
 python - "${TEACHER_RECORDS}" "${STUDENT_RECORDS}" <<'PY'
 import json, sys
 teacher, student = sys.argv[1:]

@@ -1,11 +1,8 @@
-"""QK-Restore (D6): a copy of a trained adapter whose q_proj/k_proj update is zeroed.
+"""QK-Restore (D6): a copy of a trained adapter whose q_proj/k_proj update is zeroed (Sec. 5, Hypothesis 4(iii)).
 
     python src/qk_restore.py --adapter checkpoints/csrd-q8b-1.7b --output-dir checkpoints/csrd-q8b-1.7b-qkrestore
 
-The copy routes with the pre-training W_Q, W_K and keeps every other learned update; evaluate it
-like any adapter, and extract its routing with extract_routing.py --qk-restore. Reading (Sec. 5):
-if SFT barely changes under QK-Restore while CSRD's gain over SFT shrinks by at least half,
-the gain is attributable to the routing parameters (Hypothesis 4(iii)).
+The copy routes with the pre-training W_Q, W_K and keeps every other learned update.
 For a CSRD-QK run pass <ckpt>/adapters-separate/default (the Q/K adapter is dropped entirely).
 """
 

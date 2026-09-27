@@ -4,17 +4,14 @@
     python src/evaluate.py --protocol palign   --model <ckpt> --base-model <base> --tag <tag>
     python src/evaluate.py --rescore results-proposal/<tag>/raw/aime24.jsonl        # no GPU needed
 
-Protocols (every setting can still be overridden by a flag):
+Protocols (any setting can be overridden by a flag):
     proposal  Sec. 6.4: T=0.6, top-p 0.95, top-k 20, n = 16 (AIME24/25, AMC12) / 4 (MATH500),
-              max_model_len 32768 (Qwen3-*-Base's limit; max_tokens 31744 leaves room for the prompt)
-    palign    the baselines' own protocol (SpectralGuidedLearning / P-ALIGN eval scripts): T=0.6,
-              top-p 0.9, repetition penalty 1.05, n = 3, max_model_len 4096 (max_tokens 3584), eager
-Grader: P-ALIGN's (math_verify OR oat_math_grader, palign_grader.py) by default, for every arm, so
-baseline checkpoints re-evaluated here are scored exactly like CSRD.
-
-Prompts: --prompt-style sgl (default: the students' training format, chat template with
-enable_thinking=False), thinking, or zeroshot / fewshot for the pre-distillation Base student (B0).
---export-traces writes the rollouts (for D3: teacher-forcing on student text).
+              max_model_len 32768, max_tokens 31744
+    palign    the baselines' own protocol (SGL / P-ALIGN eval scripts): T=0.6, top-p 0.9,
+              repetition penalty 1.05, n = 3, max_model_len 4096, max_tokens 3584, eager
+Grader: P-ALIGN's (math_verify OR oat_math_grader) for every arm. --prompt-style sgl (default, the
+students' training format), thinking, or zeroshot / fewshot (Base student, B0). --export-traces writes
+rollouts for D3.
 """
 
 import argparse

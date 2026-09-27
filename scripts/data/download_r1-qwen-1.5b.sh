@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Phase 0 (ONLINE, once per new server): mirror the models / datasets listed in download.txt into LOCAL_MODELS_ROOT /
-# LOCAL_DATA_ROOT, the same layout the offline infra builds from download.txt. Everything after this phase runs with
-# HF_HUB_OFFLINE=1. Not for the audited B200 (its infra downloads from download.txt itself).
-#   LOCAL_MODELS_ROOT=/data/models LOCAL_DATA_ROOT=/data/datasets bash scripts/data/download_r1-qwen-1.5b.sh
-# ALL=true also fetches the lines below the "ignored" marker (other tracks / diagnostics). HF_TOKEN is used when set.
-# DRY_RUN=true only prints what would be downloaded where.
+# Phase 0 (ONLINE, once per new server): mirror download.txt into LOCAL_MODELS_ROOT / LOCAL_DATA_ROOT. Not for the
+# offline server (its infra mirrors download.txt itself).
+# Usage: [LOCAL_MODELS_ROOT=..] [LOCAL_DATA_ROOT=..] [ALL=true] [DRY_RUN=true] bash scripts/data/download_r1-qwen-1.5b.sh
+# ALL=true also fetches the entries below the "ignored" marker; HF_TOKEN is used when set.
 set -euo pipefail
 
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

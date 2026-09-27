@@ -1,9 +1,7 @@
 """Benchmark loaders -> [{id, question, gold, task_type}] (proposal Sec. 6.4).
 
-AIME24 (30), AIME25 (30), AMC12 (AI-MO/aimo-validation-amc, 83 problems -- the version P-ALIGN
-reports; confirm before the main table, Appendix E) and MATH500. "dev" is the 200-problem dev set
-(MATH train levels 3-5, disjoint from every test set) used for hyperparameter selection and D3.
-Prompts are built by evaluate.py from prompting.py so training and evaluation share one format.
+AIME24 (30), AIME25 (30), AMC12 (AI-MO/aimo-validation-amc, 83 problems as in P-ALIGN, Appendix E),
+MATH500, and "dev": 200 MATH-train level 3-5 problems disjoint from every test set (tuning and D3).
 """
 
 import os
@@ -17,10 +15,9 @@ DEV_SIZE = 200
 
 
 def _dataset_path(repo_id: str, local_dir_name: str) -> str:
-    """BENCH_DATA_ROOT/<local_dir_name> (offline server: mirrors downloaded by hand, see download.txt).
+    """BENCH_DATA_ROOT/<local_dir_name> (offline mirror, see download.txt), or the HF id if BENCH_DATA_ROOT is empty.
 
-    With BENCH_DATA_ROOT set a missing mirror is an error, never a silent fall back to the Hub (network egress is
-    blocked there). BENCH_DATA_ROOT="" means the HF id, resolved from the local HF cache under HF_HUB_OFFLINE=1.
+    A missing mirror is an error, never a silent fall back to the Hub.
     """
     if not BENCH_DATA_ROOT:
         return repo_id

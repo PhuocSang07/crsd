@@ -1,7 +1,6 @@
 """Answer extraction and equivalence checking for math and multiple-choice benchmarks.
 
-Math answers are compared symbolically via math-verify when available, with a normalized
-string fallback so scoring still runs in environments without it.
+Math answers: normalized string match, then math-verify when installed.
 """
 
 import re

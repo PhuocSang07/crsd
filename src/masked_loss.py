@@ -2,10 +2,8 @@
 
     L_CE = -(1/Z) * sum_t M_t * log P(y_t | y_<t),   Z = supervised tokens of the whole optimizer step
 
-At 32k tokens the logits alone are 32k x 151k fp32 ~ 19 GB (Sec. 4.8), so training uses
-`chunked_cross_entropy`: the LM head runs on `chunk` positions at a time under activation
-checkpointing, which keeps one chunk of logits alive in forward and in backward -- the same
-memory profile as Liger's fused linear cross-entropy, without the extra dependency.
+At 32k tokens the logits alone are ~19 GB fp32 (Sec. 4.8), so training uses `chunked_cross_entropy`:
+the LM head runs on `chunk` positions at a time under activation checkpointing (one chunk of logits alive).
 """
 
 import torch
@@ -46,8 +44,7 @@ def chunked_cross_entropy(
 ) -> torch.Tensor:
     """Same value and gradient as masked_cross_entropy(lm_head(hidden), labels), chunk by chunk.
 
-    hidden: (B, T, D) final hidden states (after the last norm); only supervised positions are
-    ever projected, so prompt tokens cost nothing.
+    hidden: (B, T, D) final hidden states (after the last norm); only supervised positions are projected.
     """
     shift_hidden = hidden[:, :-1].reshape(-1, hidden.size(-1))
     shift_labels = labels[:, 1:].reshape(-1)

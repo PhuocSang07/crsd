@@ -1,11 +1,9 @@
-"""Pilot gates G0-G6 in one place, and the decision-tree branch they select (proposal Sec. 7, Table 6).
+"""Pilot gates G0-G6 and the decision-tree branch they select (proposal Sec. 7, Table 6).
 
     python src/pilot_report.py --track read-q8b-1.7b
 
-Reads what the pilot stages wrote: the teacher-trace retention stats (G0; gen-* tracks only -- read-*
-tracks train on the fixed s1K-1.1 set), the SFT student's diagnostics (G1, G2, G4) and D3 (G3), the
-proposal-protocol comparison (G5 accuracy), the error-injection reports (G5 detection), and run
-summaries (G6 throughput). Missing inputs are reported as "not run".
+Reads retention stats (G0, gen-* tracks), SFT diagnostics (G1-G4), gates-g5 and error-injection reports
+(G5), and run summaries (G6 throughput); missing inputs are reported as "not run".
 """
 
 import argparse

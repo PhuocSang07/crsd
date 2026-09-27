@@ -3,11 +3,8 @@
 Categories: planning, fact_retrieval, active_computation, uncertainty_management, self_checking,
 result_consolidation, final_answer. Anchors = planning | uncertainty_management | self_checking.
 
-Two labelers:
-    --labeler heuristic  keyword rules on the opening of each step (default; CPU, instant). Only an
-                         approximation -- report it as such, or validate it against --labeler llm.
-    --labeler llm        a mid-size instruct model through vLLM with definitions in the prompt
-                         (the proposal's protocol; hand-check 300 steps and report accuracy / kappa).
+    --labeler heuristic  keyword rules on each step's opening (default, CPU); an approximation only
+    --labeler llm        instruct model via vLLM with the definitions in the prompt (the proposal's protocol)
 Adds `node_labels` (one per node; "question" for v0) and `anchor` (0/1 per node) to every record.
 """
 
@@ -100,7 +97,6 @@ def label_records(records: list[dict], labeler: str, model: str | None, tp: int)
     for (r_i, n_i, _), label in zip(steps, labels):
         records[r_i]["node_labels"][n_i] = label
     for record in records:
-        # The answer node is final_answer by construction.
         record["node_labels"][-1] = "final_answer"
         record["anchor"] = [int(label in ANCHOR_LABELS) for label in record["node_labels"]]
 

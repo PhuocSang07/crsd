@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Canonical content (question / thinking / answer) for a track's train and held-out sets.
-#   read-*: s1K-1.1 DeepSeek-R1 traces (the baselines' data) + 300 OpenR1-Math R1 traces (held-out)
-#   gen-*:  the teacher's own traces from scripts/gen/gen_traces.sh
+# Canonical content (question / thinking / answer) for a track's train and held-out sets:
+# read-* = s1K-1.1 + 300 OpenR1-Math R1 traces; gen-* = the teacher's own traces (scripts/gen/gen_traces.sh).
 # Usage: scripts/data/canonical.sh TRACK
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../common.sh" "${1:-}"

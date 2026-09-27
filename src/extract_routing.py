@@ -1,19 +1,15 @@
 """Offline routing extraction from a frozen model reading traces (teacher targets, Sec. 4.3 / 4.8).
 
-    --stage calibrate  every head of every layer on the first --n-traces records (D_cal, 200):
-                       vertical scores nu_j -> per-trace receiver scores (both "excess_bg" and
+    --stage calibrate  all heads on the first --n-traces records (D_cal): receiver scores ("excess_bg",
                        "kurtosis") and mean attention distance -> calib-shard*.npz
-    --stage select     (CPU) merge the calibration shards, keep the top-K heads per depth band ->
-                       heads-<score>.json for both scores plus a random-K control (A2), with
-                       split-half stability
-    --stage targets    the selected heads on every record -> <output-dir>/<id>.npz with
-                       P [bands, N, N] (band-averaged far routing, lower triangular),
-                       Z [bands, N] (far mass), rows [N], char_spans [N, 2]
+    --stage select     (CPU) top-K heads per depth band -> heads-<score>.json, plus random-K (A2) and
+                       all-band controls, with split-half stability
+    --stage targets    selected heads on every record -> <output-dir>/<id>.npz with P [bands, N, N]
+                       (band-averaged far routing, lower triangular), Z [bands, N] (far mass), rows [N],
+                       char_spans [N, 2], hash [N]
 
-The same script reads the *student* for diagnostics (--adapter, --qk-restore, its own heads.json).
-Queries: the full token set of every row (Q_T(i) = I_T(v_i)). Each layer's attention is recomputed
-from the captured q/k in query blocks with an exact full-row softmax, so no T x T matrix is ever
-stored and SDPA/FlashAttention still runs the forward.
+Also reads the student for diagnostics (--adapter, --qk-restore). Attention is recomputed from the
+captured q/k in query blocks with an exact full-row softmax, so no T x T matrix is ever stored.
 """
 
 import argparse
@@ -198,12 +194,12 @@ def select(output: Path, k_per_band: int, seed: int, expected_traces: int | None
         random_heads.append([list(pair) for pair in rng.sample(pool, min(k_per_band, len(pool)))])
     base = json.loads((output / "heads-excess_bg.json").read_text())
     (output / "heads-random.json").write_text(json.dumps({**base, "score": "random", "heads": random_heads}, indent=2))
-    # Every head of each band: A2/A5 "whole band", and the candidate pool for causal selection (CSRD-C).
+    # Whole band: A2/A5 control and the candidate pool for causal selection (CSRD-C).
     all_band = [[[l, h] for l in band for h in range(num_heads)] for band in layers]
     (output / "heads-allband.json").write_text(json.dumps(
         {**base, "score": "allband", "k_per_band": max(len(b) for b in all_band), "heads": all_band}, indent=2))
     np.save(output / "mean-distance.npy", distance)
-    # Table 6 week 1 "xác nhận receiver heads bằng cả hai điểm receiver": how much the two selections agree.
+    # How much the two receiver scores' selections agree (Table 6).
     by_mode = {mode: json.loads((output / f"heads-{mode}.json").read_text())["heads"] for mode in SCORE_MODES}
     summary["agreement_excess_bg_vs_kurtosis"] = {
         "topk_overlap": [len({tuple(x) for x in a} & {tuple(x) for x in b}) / max(1, k_per_band)

@@ -2,8 +2,7 @@
 
     pass@k = E_problems [ 1 - C(n - c, k) / C(n, k) ]
 
-With k = 1 this is the mean accuracy over the n samples. Computed in the numerically stable
-product form, so n = 16 and k = 3 never touch large binomials.
+Computed in the numerically stable product form; with k = 1 it is the mean accuracy.
 """
 
 import numpy as np

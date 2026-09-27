@@ -3,11 +3,9 @@
     python scripts/smoke_test_pipeline.py --teacher-tokenizer <R1-Distill or Qwen3 tokenizer dir> \\
         --student-tokenizer <Qwen3 tokenizer dir> [--workdir /tmp/crsd-smoke]
 
-The teacher is a tiny Qwen2 model with the teacher's tokenizer (a DeepSeek-R1-Distill tokenizer makes this the
-cross-tokenizer case of the read-d32b-q8b track), the student a tiny Qwen3 model. Every CLI stage runs in order:
-canonical content -> teacher (thinking) and student (SGL) records -> anchors -> teacher calibrate/select/targets
--> causal targets -> signal bank -> SFT, CSRD, CSRD-PQ, CSRD-QK training from the bank -> student extraction
-(+ QK-Restore) -> diagnostics. It checks plumbing, not results.
+Tiny Qwen2 teacher / Qwen3 student with the given tokenizers; runs every CLI stage in order (records,
+anchors, teacher routing, causal targets, signal bank, SFT/CSRD variants, student extraction, diagnostics).
+Checks plumbing, not results.
 """
 
 import argparse

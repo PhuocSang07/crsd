@@ -1,20 +1,6 @@
 #!/usr/bin/env bash
 # Shared track table and environment for every phase script: `source scripts/common.sh TRACK`.
-#
-# Tracks (teacher -> student, training data):
-#   read-q8b-1.7b   Qwen3-8B reads s1K-1.1 (R1 traces)            -> Qwen3-1.7B-Base   (main: same data as the baselines)
-#   read-q8b-r1.5b  Qwen3-8B reads s1K-1.1 (R1 traces)            -> R1-Distill-Qwen-1.5B (main: same student as the SGL baselines)
-#   read-d32b-q8b   R1-Distill-Qwen-32B reads s1K-1.1 (R1 traces)  -> Qwen3-8B          (main: same student as P-ALIGN/SSFT)
-#   gen-q8b-1.7b    Qwen3-8B writes s1K-Q8B and reads it          -> Qwen3-1.7B-Base   (ablation: teacher = author)
-#   gen-d32b-q8b    R1-Distill-Qwen-32B writes s1K-D32B, reads it  -> Qwen3-8B          (ablation: teacher = author)
-#
-# Layout. Content and teacher signals depend only on (teacher, data), never on the student, so a signal
-# bank computed once (e.g. by the 32B teacher) is reused by any later student:
-#   data/canonical/<CANON>.jsonl                        question/thinking/answer (build_canonical.py)
-#   data/records/<CANON>-<model>-<style>.jsonl          one model's rendering + node token spans
-#   data/teacher/<TT>-<CANON>/{routing,targets,causal}  teacher extraction (resumable per-trace .npz)
-#   signals/<TT>-<CANON>-dmin<D>-<SCORE>.safetensors     packed, reusable signal bank
-#   checkpoints/<arm>-<track>-s<seed>, results-{proposal,palign}/<tag>
+# Teacher signals depend only on (teacher, data): one signal bank is reused by any student.
 set -euo pipefail
 
 TRACK="${1:?track is required: read-q8b-1.7b | read-q8b-r1.5b | read-d32b-q8b | gen-q8b-1.7b | gen-d32b-q8b}"
@@ -31,7 +17,7 @@ BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${BASE_PATH}"
 PROJECT_ENV="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}"
 if [[ -z "${VIRTUAL_ENV:-}" ]]; then
-  # never build it here: scripts/setup.sh needs PyPI, and the offline server builds the venv from crsd.txt
+  # never build the venv here: scripts/setup.sh needs PyPI (the offline server builds it from crsd.txt)
   [[ -f "${PROJECT_ENV}/bin/activate" ]] || {
     echo "ERROR: env not found at ${PROJECT_ENV}; build it from crsd.txt (repo root) or scripts/setup.sh, or set PROJECT_ENV" >&2
     exit 1
@@ -42,8 +28,7 @@ export PYTHONPATH="${BASE_PATH}/src"
 export TOKENIZERS_PARALLELISM=false
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
-# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
-# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping. HF_HUB_OFFLINE=0 re-enables the Hub.
+# Offline server: models/data come from the download.txt mirrors; no HF Hub access, no vLLM usage stats.
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-${HF_HUB_OFFLINE}}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-${HF_HUB_OFFLINE}}"
@@ -53,7 +38,7 @@ export VLLM_DO_NOT_TRACK=1
 export DO_NOT_TRACK=1
 LOCAL_MODELS_ROOT="${LOCAL_MODELS_ROOT:-/mnt/local/_models/aiskylimit_new_nothingnew_2}"
 LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-/mnt/local/_data/aiskylimit_new_nothingnew_2}"
-# benchmarks.py / the 13-gram filter read s1K and the test sets from here; BENCH_DATA_ROOT="" = HF Hub
+# Local s1K/test-set mirrors for benchmarks.py and decontamination; BENCH_DATA_ROOT="" uses the HF Hub.
 export BENCH_DATA_ROOT="${BENCH_DATA_ROOT-${LOCAL_DATA_ROOT}}"
 read -ra GPUS <<< "${GPUS:-0}"
 mkdir -p logs data/canonical data/records signals
@@ -61,13 +46,13 @@ mkdir -p logs data/canonical data/records signals
 TEACHER="${LOCAL_MODELS_ROOT}/${TEACHER_DIR}"
 STUDENT="${LOCAL_MODELS_ROOT}/${STUDENT_DIR}"
 JUDGE="${LOCAL_MODELS_ROOT}/Qwen3-8B"            # non-thinking LLM judge for free-form answers
-# GPUs per teacher process: the 32B teacher (64 GB of bf16 weights) is sharded over 2 GPUs.
+# GPUs per teacher process: the 32B teacher is sharded over 2.
 TEACHER_GPUS=1; [[ "${TT}" == d32b ]] && TEACHER_GPUS=2
 TEACHER_GPUS="${TEACHER_GPUS_OVERRIDE:-${TEACHER_GPUS}}"
 
 if [[ "${MODE}" == read ]]; then
-  TRAIN_CANON=s1k11                 # simplescaling/s1K-1.1, DeepSeek-R1 trajectory + attempt
-  HELDOUT_CANON=openr1-heldout      # 300 R1 traces from OpenR1-Math, 13-gram-disjoint from s1K and the tests
+  TRAIN_CANON=s1k11                 # simplescaling/s1K-1.1 (DeepSeek-R1 traces)
+  HELDOUT_CANON=openr1-heldout      # 300 OpenR1-Math R1 traces, 13-gram-disjoint from s1K/tests
 else
   TRAIN_CANON="gen-${TT}-s1k"       # the teacher's own traces on the s1K questions
   HELDOUT_CANON="gen-${TT}-heldout" # its own traces on MATH-train L3-5 (disjoint from dev/s1K/tests)
@@ -88,14 +73,14 @@ TEACHER_WORK="data/teacher/${TT}-${TRAIN_CANON}${SEG_TAG}"
 TEACHER_HELDOUT_WORK="data/teacher/${TT}-${HELDOUT_CANON}${SEG_TAG}"
 SIGNALS="signals/${TT}-${TRAIN_CANON}${SEG_TAG}-dmin${D_MIN}-${SCORE}.safetensors"
 
-# Groups of TEACHER_GPUS GPUs, one teacher process per group (CUDA_VISIBLE_DEVICES strings).
+# One teacher process per group of TEACHER_GPUS GPUs.
 GPU_GROUPS=()
 for (( g = 0; g + TEACHER_GPUS <= ${#GPUS[@]}; g += TEACHER_GPUS )); do
   GPU_GROUPS+=("$(IFS=,; echo "${GPUS[*]:g:TEACHER_GPUS}")")
 done
 [[ ${#GPU_GROUPS[@]} -gt 0 ]] || { echo "need at least ${TEACHER_GPUS} GPU(s) in GPUS" >&2; exit 2; }
 
-sharded() {  # sharded NAME cmd...: one process per GPU group with --num-shards/--shard-index, wait for all
+sharded() {  # sharded NAME cmd...: one shard per GPU group, wait for all
   local name=$1; shift
   local pids=() fail=0 n=${#GPU_GROUPS[@]}
   for i in "${!GPU_GROUPS[@]}"; do

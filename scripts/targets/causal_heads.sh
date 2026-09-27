@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# CSRD-C prerequisites (decision tree: G1 true, G4 false): teacher heads chosen by attention-causal agreement.
-#   1. per-head routing of every band head on 40 traces of the causal subset (all band heads' per-head R in
-#      float16 is ~0.2 GB per trace for the 8B teacher, so the whole subset would not fit comfortably)
-#   2. median Spearman(R_head, C~) per head -> top-16 per band -> heads-causal.json
-#   3. routing targets of those heads on every train trace, packed with the causal targets into
-#      signals/<TT>-<CANON>-dmin<D>-causal.safetensors (used by the csrd-c and csrd-causalonly arms)
+# CSRD-C prerequisites: teacher heads chosen by attention-causal agreement on a 40-trace causal subset, then their
+# routing targets packed with the causal targets into signals/<TT>-<CANON>-dmin<D>-causal.safetensors.
 # Usage: scripts/targets/causal_heads.sh TRACK
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../common.sh" "${1:-}"

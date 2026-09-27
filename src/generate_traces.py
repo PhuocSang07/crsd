@@ -1,22 +1,14 @@
 """Build s1K-Q8B (proposal Sec. 6.2): the teacher re-writes every trace it will later be read on.
 
-Two stages, so the expensive one never has to be redone to change a filtering rule:
-
-    --stage generate   Qwen3-8B (thinking) samples n traces per question with vLLM
+    --stage generate   teacher (thinking) samples n traces per question with vLLM
                        (T=0.6, top-p 0.95, top-k 20, up to 32,768 tokens) -> raw JSONL
-    --stage select     keep traces that closed </think>, were not cut at max_tokens and are correct;
-                       per question pick one correct trace at random (seeded), keep the other
-                       the other seven as RSR candidates -> traces JSONL + retention stats (gate G0)
+    --stage select     keep closed, untruncated, correct traces; pick one per question at random (seeded),
+                       the others become RSR candidates -> traces JSONL + retention stats (gate G0)
 
-Correctness: math-verify against the gold answer when one can be read off (a \\boxed{} in the
-reference, or a short bare reference); otherwise an LLM judge (--judge-model, vLLM; a non-thinking chat
-model such as Qwen3-8B, which answers in one word -- not R1-Distill, which always thinks first) compares the
-trace's final answer with the reference solution. Without a judge those questions are dropped and
-counted.
-
-Sources: "s1k" (simplescaling/s1K, the 1,000 training questions) and "math-train" (MATH train split,
-levels 3-5, minus every problem sharing a 13-gram with s1K or the four test sets) for the dev set
-and the held-out set.
+Correctness: math-verify when a gold answer can be read off the reference (\\boxed{} or a short bare
+answer); otherwise a non-thinking LLM judge (--judge-model), or the question is dropped and counted.
+Sources: "s1k" (the 1,000 training questions) and "math-train" (MATH train levels 3-5, 13-gram
+decontaminated against s1K and the test sets) for the dev and held-out sets.
 """
 
 import argparse
@@ -71,8 +63,7 @@ def load_questions(source: str, dataset_name: str | None, seed: int, skip: int, 
             for r in rows
             if r["level"] in ("Level 3", "Level 4", "Level 5")
         ]
-        # Sec. 6.2: dev and held-out must not overlap s1K or any test set (13-gram rule). s1K draws on
-        # MATH itself (qfq/openaimath), so without this a few dev/held-out problems are s1K problems.
+        # Sec. 6.2 13-gram rule: s1K draws on MATH itself, so some MATH-train problems are s1K problems.
         banned = contamination_ngrams()
         items = [item for item in items if not (ngrams(item["question"]) & banned)]
         random.Random(seed).shuffle(items)
@@ -94,8 +85,7 @@ def generate(args) -> None:
     items = load_questions(args.source, args.dataset_name, args.seed, args.skip, args.limit)
     items = items[args.shard_index :: args.num_shards]
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    # The teacher writes in its own thinking format (Qwen3 thinking mode, or R1-Distill's template, which
-    # opens <think> itself); the user turn is the SGL/P-ALIGN instruction the students are trained with.
+    # Teacher's own thinking format; the user turn is the SGL/P-ALIGN instruction the students train on.
     prompts = [render_prompt(tokenizer, item["question"], "thinking") for item in items]
     llm = LLM(
         model=args.model_name,
@@ -211,8 +201,7 @@ def select(args) -> None:
             "response": row["generations"][chosen]["text"],
             "n_tokens": row["generations"][chosen]["n_tokens"],
             "teacher_solve_rate": len(correct) / len(row["generations"]),
-            # RSR (baseline B6) ranks the other seven traces of the same question (Sec. 6.2); `correct` is
-            # None for a truncated/unclosed trace.
+            # RSR (baseline B6) candidates; `correct` is None for a truncated/unclosed trace.
             "candidates": [
                 {"text": g["text"], "correct": verdict.get(i), "finish_reason": g["finish_reason"], "n_tokens": g["n_tokens"]}
                 for i, g in enumerate(row["generations"]) if i != chosen

@@ -1,19 +1,13 @@
-"""Canonical trace content and how each model sees it.
+"""Canonical trace content {question, thinking, answer} and how each model renders it.
 
-A trace is stored once as *content* -- {question, thinking, answer} -- and rendered per model:
+    style "sgl"       student training text, byte-identical to SpectralGuidedLearning/data_prep.py (the
+                      SGL / P-ALIGN / SSFT baselines' format): chat template with enable_thinking=False,
+                      user "Please reason step by step, ... \\boxed{}.{problem}", response
+                      "{thinking}\\n\\n\\n{answer}" (<think> markers stripped), then eos.
+    style "thinking"  teacher reading the trace as its own reasoning: thinking-mode template, response
+                      "<think>\\n{thinking}\\n</think>\\n\\n{answer}" (no opener if the template opens <think>).
 
-    style "sgl"       the student's training text, byte-identical to SpectralGuidedLearning/data_prep.py
-                      (the format the SGL / P-ALIGN / SSFT baselines were trained on): chat template with
-                      enable_thinking=False, user turn "Please reason step by step, ... \\boxed{}.{problem}",
-                      response "{thinking}\\n\\n\\n{answer}" (the <think> markers stripped), then the
-                      tokenizer's eos token.
-    style "thinking"  how a teacher reads a trace as its own reasoning: its own chat template in thinking
-                      mode, response "<think>\\n{thinking}\\n</think>\\n\\n{answer}" -- without the opener
-                      when the template already opens <think> (DeepSeek-R1-Distill).
-
-Nodes (step_nodes.py) are defined on the content, so teacher and student get the same nodes even with
-different tokenizers and templates; every node carries a hash of its text, which is how routing
-signals computed on the teacher's rendering are matched to the student's rendering.
+Nodes are defined on the content and matched across models by text hash (step_nodes.py).
 """
 
 import hashlib
@@ -73,9 +67,8 @@ def sgl_reconcile(prompt: str, response: str) -> str:
 def render(tokenizer, content: dict, style: str) -> dict | None:
     """content {question, thinking, answer} -> {prompt, response, question_span, thinking_span, answer_span}.
 
-    Spans are character offsets: question_span in the prompt, the others in the response. answer may
-    be empty for a truncated rollout (answer_span is then None). Returns None if the rendered text
-    does not contain the content verbatim (e.g. a trajectory quoting a literal "</think>").
+    question_span indexes the prompt, the others the response; answer_span is None for a truncated
+    rollout. None if the content is not found verbatim (e.g. a trace quoting a literal "</think>").
     """
     thinking, answer = nfc(content["thinking"]).strip(), nfc(content.get("answer") or "").strip()
     prompt = render_prompt(tokenizer, content["question"], style)

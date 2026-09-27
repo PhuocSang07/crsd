@@ -1,13 +1,12 @@
 """LoRA SFT with the optional CSRD routing losses (proposal Sec. 4.5-4.7, Table 3).
 
-Every arm -- SFT baseline (B1) and all CSRD variants -- goes through this one entry point with the
-same data, LoRA config, schedule and seed; only the --csrd-* flags differ, so a gap between arms is
-attributable to the objective, not the engine. --csrd-lambda 0 (default) is plain SFT.
+Every arm (SFT baseline B1 and all CSRD variants) uses this entry point with the same data, LoRA,
+schedule and seed; only the --csrd-* flags differ. --csrd-lambda 0 (default) is plain SFT.
 
     L = L_CE + lambda_r * (L_route + (lambda_m/lambda_r) L_mass + (lambda_c/lambda_r) L_causal)
 
-CE is computed chunk-wise on the final hidden states (masked_loss.chunked_cross_entropy), so a 32k
-sequence never materializes its 32k x 151k logits. Settings come from CLI flags or --config (yaml).
+CE is chunked over the final hidden states (masked_loss.chunked_cross_entropy).
+Settings come from CLI flags or --config (yaml).
 """
 
 import argparse
@@ -101,8 +100,7 @@ def build_training_arguments(config: dict) -> TrainingArguments:
         per_device_train_batch_size=config["per_device_batch_size"],
         gradient_accumulation_steps=config["gradient_accumulation_steps"],
         learning_rate=config["learning_rate"],
-        # SGL's schedule: cosine down to min_learning_rate. min_lr_rate (a ratio), not min_lr: the latter
-        # reads optimizer.defaults["lr"], which DeepSpeed's wrapped ZeRO optimizer doesn't expose.
+        # min_lr_rate, not min_lr: min_lr reads optimizer.defaults["lr"], which DeepSpeed ZeRO doesn't expose.
         lr_scheduler_type="cosine_with_min_lr",
         lr_scheduler_kwargs={"min_lr_rate": config["min_learning_rate"] / config["learning_rate"]},
         warmup_ratio=config["warmup_ratio"],
@@ -129,7 +127,7 @@ def attach_lora(model, config: dict):
         target_modules=config["lora_target_modules"].split(","), bias="none", task_type="CAUSAL_LM",
     ))
     if config.get("csrd_qk_rank"):
-        # CSRD-QK: a second adapter on q_proj/k_proj of the band layers only, trained by the routing loss.
+        # CSRD-QK: a second adapter on q_proj/k_proj of the band layers, trained by the routing loss.
         layers = sorted({l for band in band_layers(model.config.num_hidden_layers) for l in band})
         model.add_adapter(QK_ADAPTER, LoraConfig(
             r=config["csrd_qk_rank"], lora_alpha=config["csrd_qk_rank"], lora_dropout=0.0,
@@ -170,7 +168,7 @@ def main() -> None:
     parser.add_argument("--save-steps", type=int)
     parser.add_argument("--save-total-limit", type=int)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction)
-    # LoRA (defaults = the baselines' config in SpectralGuidedLearning: all-linear, r = alpha = 16, dropout 0.05)
+    # LoRA (defaults match the SpectralGuidedLearning baselines)
     parser.add_argument("--lora-r", type=int)
     parser.add_argument("--lora-alpha", type=int)
     parser.add_argument("--lora-dropout", type=float)
@@ -292,8 +290,7 @@ def main() -> None:
 
     if not config["csrd_qk_rank"]:
         trainer.save_model(config["output_dir"])  # collective-safe: Trainer writes on the main process only
-    # Everything below writes files once: under torchrun every rank reaches this point, and eight
-    # processes writing the same safetensors/json concurrently can corrupt them.
+    # Rank 0 only below: every torchrun rank writing the same files concurrently can corrupt them.
     if not trainer.is_world_process_zero():
         return
     if config.get("metrics_log"):
@@ -302,9 +299,7 @@ def main() -> None:
         path.write_text(json.dumps({"config": config, "final_metrics": result.metrics,
                                     "log_history": trainer.state.log_history}, indent=2, default=str))
 
-    # Adapter-only checkpoint: evaluate.py loads it through vLLM's LoRA support. A CSRD-QK run keeps
-    # both adapters under adapters-separate/ and writes the base with both merged as a full
-    # checkpoint (a 1.7B/4B model is small), so vLLM serves exactly the trained function.
+    # CSRD-QK: both adapters under adapters-separate/ plus a fully merged checkpoint for vLLM.
     if config["csrd_qk_rank"]:
         trainer.model.save_pretrained(os.path.join(config["output_dir"], "adapters-separate"))
         trainer.model.base_model.set_adapter(["default", QK_ADAPTER])
@@ -319,7 +314,7 @@ def main() -> None:
         "csrd_lambda": config["csrd_lambda"], "csrd_qk_rank": config["csrd_qk_rank"],
         "train_runtime_s": result.metrics.get("train_runtime"), "final_train_loss": result.metrics.get("train_loss"),
         "train_samples_per_second": result.metrics.get("train_samples_per_second"),
-        # Sec. 6.7 efficiency: peak memory at 32k (rank 0); G6 compares train_runtime_s with SFT
+        # Sec. 6.7 efficiency (rank 0)
         "peak_memory_gb": torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else None,
     }, indent=2))
 

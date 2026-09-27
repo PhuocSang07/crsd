@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
-# Train one arm of a track. Hyperparameters = the baselines' (SpectralGuidedLearning
-# project_commands_spectral_r1-qwen-1.5b.sh): LoRA all-linear r = alpha = 16, dropout 0.05, lr 5e-5 cosine to
-# 1e-5, warmup 0.1, 3 epochs, effective batch 32 (micro-batch 1), seed 42, 32k tokens, DeepSpeed ZeRO-2 offload,
-# on the baselines' exact training text (s1K-1.1, SGL format). Only the --csrd-* flags differ between arms.
+# Train one arm of a track with the SGL baselines' config; only the --csrd-* flags differ between arms.
 # Usage: scripts/train/train.sh TRACK ARM [SEED]
-#   sft            LoRA SFT, same engine (the "vanilla" SGL arm)
-#   csrd           receiver heads (excess kurtosis, background-subtracted), L_route + L_mass
-#   csrd-a         CSRD-A: anchor rows weighted 1 + beta (A8)
-#   csrd-c         CSRD-C: causally selected heads + L_causal (needs scripts/targets/causal_heads.sh)
-#   csrd-pq        CSRD-PQ: per-query, per-head KL (A14)
-#   csrd-qk        CSRD-QK: separate Q/K adapter trained only by the routing losses (A12; DDP, not DeepSpeed)
-#   csrd-nomass    A7: lambda_m = 0              csrd-band      A5: whole band instead of K_S receiver heads
-#   csrd-kurtosis  A2: raw-kurtosis heads        csrd-causalonly A3: L_causal + L_mass, no L_route
-#   csrd-b1/-b2    A4: middle / late band only
-# Env: LAMBDA (0.3), LR (5e-5), EPOCHS (3), LORA_R (16, A13), QUERIES (8, A6), D_MIN (4, A1), GPUS.
-# A trained arm is skipped when its output dir already holds adapter_config.json (config.json for csrd-qk).
+#   ARM: sft | csrd | csrd-a (A8) | csrd-c (needs causal_heads.sh) | csrd-pq (A14) | csrd-qk (A12, DDP) |
+#        csrd-nomass (A7) | csrd-band (A5) | csrd-kurtosis (A2) | csrd-causalonly (A3) | csrd-b1/-b2 (A4)
+# Env: LAMBDA (0.3), LR (5e-5), EPOCHS (3), LORA_R (16), QUERIES (8), D_MIN (4), GPUS. Finished arms are skipped.
 set -euo pipefail
 ARM="${2:?arm is required (sft, csrd, csrd-a, csrd-c, csrd-pq, csrd-qk, csrd-nomass, csrd-band, csrd-kurtosis, csrd-causalonly, csrd-b1, csrd-b2)}"
 SEED="${3:-42}"
@@ -36,7 +25,7 @@ QUERIES="${QUERIES:-8}"
 DS_CONFIG="${DS_CONFIG-${BASE_PATH}/configs/deepspeed/ds_config_zero2_offload.json}"
 BANK="${SIGNALS}"
 
-# L_causal belongs to CSRD-C only (Sec. 4.9): the bank also carries causal targets, so every other arm sets lambda_c = 0.
+# The bank also carries causal targets: only CSRD-C uses L_causal.
 CSRD_OPTS=""
 [[ "${ARM}" != csrd-c && "${ARM}" != csrd-causalonly ]] && CSRD_OPTS+=" --csrd-causal-ratio 0"
 case "${ARM}" in
