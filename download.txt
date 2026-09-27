@@ -1,16 +1,20 @@
 #d
 #datasets
 --hf-dataset simplescaling/s1K-1.1 /mnt/local/_data/@PROJECT@/s1K-1.1
---hf-dataset simplescaling/s1K /mnt/local/_data/@PROJECT@/s1K
---hf-dataset open-r1/OpenR1-Math-220k /mnt/local/_data/@PROJECT@/OpenR1-Math-220k
---hf-dataset DigitalLearningGmbH/MATH-lighteval /mnt/local/_data/@PROJECT@/MATH-lighteval
 --hf-dataset math-ai/aime24 /mnt/local/_data/@PROJECT@/aime24
 --hf-dataset math-ai/aime25 /mnt/local/_data/@PROJECT@/aime25
 --hf-dataset HuggingFaceH4/MATH-500 /mnt/local/_data/@PROJECT@/MATH-500
 --hf-dataset AI-MO/aimo-validation-amc /mnt/local/_data/@PROJECT@/aimo-validation-amc
 #models
 --hf Qwen/Qwen3-8B /mnt/local/_models/@PROJECT@/Qwen3-8B
---hf Qwen/Qwen3-1.7B-Base /mnt/local/_models/@PROJECT@/Qwen3-1.7B-Base
---hf deepseek-ai/DeepSeek-R1-Distill-Qwen-32B /mnt/local/_models/@PROJECT@/DeepSeek-R1-Distill-Qwen-32B
+--hf deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B /mnt/local/_models/@PROJECT@/DeepSeek-R1-Distill-Qwen-1.5B
 
 (this line and below are ignored)
+Above: everything project_commands_csrd_r1-qwen-1.5b.sh reads (s1K-1.1 train data, the 4 P-ALIGN test sets, the
+Qwen3-8B teacher, the R1-Distill-Qwen-1.5B student). The venv comes from crsd.txt at the repo root.
+The other tracks / diagnostics additionally need (move above the marker to download):
+--hf-dataset open-r1/OpenR1-Math-220k /mnt/local/_data/@PROJECT@/OpenR1-Math-220k            held-out traces for D1-D4 (diag.sh)
+--hf-dataset DigitalLearningGmbH/MATH-lighteval /mnt/local/_data/@PROJECT@/MATH-lighteval    dev set (D3), gen tracks
+--hf-dataset simplescaling/s1K /mnt/local/_data/@PROJECT@/s1K                                gen tracks, 13-gram report
+--hf deepseek-ai/DeepSeek-R1-Distill-Qwen-32B /mnt/local/_models/@PROJECT@/DeepSeek-R1-Distill-Qwen-32B   read-d32b-q8b teacher
+--hf Qwen/Qwen3-1.7B-Base /mnt/local/_models/@PROJECT@/Qwen3-1.7B-Base                        read-q8b-1.7b (dropped)

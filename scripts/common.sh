@@ -31,13 +31,26 @@ BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${BASE_PATH}"
 PROJECT_ENV="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}"
 if [[ -z "${VIRTUAL_ENV:-}" ]]; then
-  [[ -f "${PROJECT_ENV}/bin/activate" ]] || bash "${BASE_PATH}/scripts/setup.sh"
+  # never build it here: scripts/setup.sh needs PyPI, and the offline server builds the venv from crsd.txt
+  [[ -f "${PROJECT_ENV}/bin/activate" ]] || {
+    echo "ERROR: env not found at ${PROJECT_ENV}; build it from crsd.txt (repo root) or scripts/setup.sh, or set PROJECT_ENV" >&2
+    exit 1
+  }
   source "${PROJECT_ENV}/bin/activate"
 fi
 export PYTHONPATH="${BASE_PATH}/src"
 export TOKENIZERS_PARALLELISM=false
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
+# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
+# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping. HF_HUB_OFFLINE=0 re-enables the Hub.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-${HF_HUB_OFFLINE}}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-${HF_HUB_OFFLINE}}"
+export HF_HUB_DISABLE_TELEMETRY=1
+export VLLM_NO_USAGE_STATS=1
+export VLLM_DO_NOT_TRACK=1
+export DO_NOT_TRACK=1
 LOCAL_MODELS_ROOT="${LOCAL_MODELS_ROOT:-/mnt/local/_models/aiskylimit_new_nothingnew_2}"
 LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-/mnt/local/_data/aiskylimit_new_nothingnew_2}"
 # benchmarks.py / the 13-gram filter read s1K and the test sets from here; BENCH_DATA_ROOT="" = HF Hub

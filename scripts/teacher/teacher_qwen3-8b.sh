@@ -8,13 +8,25 @@ set -euo pipefail
 
 read -ra GPUS <<< "${GPUS:-0}"
 export TOKENIZERS_PARALLELISM=false
+# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
+# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping.
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_DISABLE_TELEMETRY=1
+export VLLM_NO_USAGE_STATS=1
+export VLLM_DO_NOT_TRACK=1
+export DO_NOT_TRACK=1
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${BASE_PATH}"
 PROJECT_ENV="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}"
 if [[ -z "${VIRTUAL_ENV:-}" ]]; then
-  [[ -f "${PROJECT_ENV}/bin/activate" ]] || ./scripts/setup.sh
+  [[ -f "${PROJECT_ENV}/bin/activate" ]] || {
+    echo "ERROR: env not found at ${PROJECT_ENV}; build it from crsd.txt (repo root) or set PROJECT_ENV" >&2
+    exit 1
+  }
   source "${PROJECT_ENV}/bin/activate"
 fi
 export PYTHONPATH="${BASE_PATH}/src"
@@ -38,6 +50,7 @@ if [[ -s "${SIGNALS_PATH}" ]]; then
   python "${BASE_PATH}/src/signal_bank.py" info "${SIGNALS_PATH}"
   exit 0
 fi
+[[ -d "${MODEL_NAME}" ]] || { echo "missing local model ${MODEL_NAME} (download.txt)" >&2; exit 1; }
 
 run_shards() {  # run_shards NAME args...: one process per GPU (--num-shards/--shard-index), wait for all
   local name=$1; shift

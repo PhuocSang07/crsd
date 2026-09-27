@@ -10,6 +10,15 @@ set -euo pipefail
 read -ra GPUS <<< "${GPUS:-0}"
 export CUDA_VISIBLE_DEVICES=$(IFS=,; echo "${GPUS[*]}")
 export TOKENIZERS_PARALLELISM=false
+# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
+# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping.
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_DISABLE_TELEMETRY=1
+export VLLM_NO_USAGE_STATS=1
+export VLLM_DO_NOT_TRACK=1
+export DO_NOT_TRACK=1
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 # ZeRO-2 offload JIT-compiles cpu_adam against system nvcc, which can trail the torch cuXXX
 # build -- skip that version check.
@@ -33,7 +42,10 @@ DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --rdzv_backend static \
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROJECT_ENV="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}"
 if [[ -z "${VIRTUAL_ENV:-}" ]]; then
-  [[ -f "${PROJECT_ENV}/bin/activate" ]] || "${BASE_PATH}/scripts/setup.sh"
+  [[ -f "${PROJECT_ENV}/bin/activate" ]] || {
+    echo "ERROR: env not found at ${PROJECT_ENV}; build it from crsd.txt (repo root) or set PROJECT_ENV" >&2
+    exit 1
+  }
   source "${PROJECT_ENV}/bin/activate"
 fi
 export PYTHONPATH="${BASE_PATH}/src"
@@ -84,6 +96,7 @@ CSRD_WARMUP_FRAC=0.1
 CSRD_RAMP_FRAC=0.1
 CSRD_GRAD_LOG_INTERVAL=20
 
+[[ -d "${MODEL_NAME}" ]] || { echo "missing local model ${MODEL_NAME} (download.txt)" >&2; exit 1; }
 [[ -f "${DATA_PATH}" ]] || { echo "missing ${DATA_PATH}: run scripts/data/data_r1-qwen-1.5b.sh first" >&2; exit 1; }
 [[ -s "${SIGNALS_PATH}" ]] || { echo "missing ${SIGNALS_PATH}: run scripts/teacher/teacher_qwen3-8b.sh (or copy the bank)" >&2; exit 1; }
 if [[ -f "${OUTPUT_DIR}/adapter_config.json" ]]; then

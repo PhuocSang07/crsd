@@ -9,6 +9,15 @@ set -euo pipefail
 read -ra GPUS <<< "${GPUS:-0}"
 export CUDA_VISIBLE_DEVICES=$(IFS=,; echo "${GPUS[*]}")
 export TOKENIZERS_PARALLELISM=false
+# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
+# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping.
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_HUB_DISABLE_TELEMETRY=1
+export VLLM_NO_USAGE_STATS=1
+export VLLM_DO_NOT_TRACK=1
+export DO_NOT_TRACK=1
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
 export BENCH_DATA_ROOT="${BENCH_DATA_ROOT-/mnt/local/_data/aiskylimit_new_nothingnew_2}"
@@ -16,7 +25,10 @@ export BENCH_DATA_ROOT="${BENCH_DATA_ROOT-/mnt/local/_data/aiskylimit_new_nothin
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROJECT_ENV="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}"
 if [[ -z "${VIRTUAL_ENV:-}" ]]; then
-  [[ -f "${PROJECT_ENV}/bin/activate" ]] || "${BASE_PATH}/scripts/setup.sh"
+  [[ -f "${PROJECT_ENV}/bin/activate" ]] || {
+    echo "ERROR: env not found at ${PROJECT_ENV}; build it from crsd.txt (repo root) or set PROJECT_ENV" >&2
+    exit 1
+  }
   source "${PROJECT_ENV}/bin/activate"
 fi
 export PYTHONPATH="${BASE_PATH}/src"
@@ -29,6 +41,8 @@ TAG="csrd-lora-l0.1-r1-qwen-1.5b"
 [[ -n "${1:-}" ]] && MODEL="$1"
 [[ -n "${2:-}" ]] && TAG="$2"
 [[ "${MODEL}" == base ]] && MODEL="${BASE_MODEL}"
+[[ -d "${BASE_MODEL}" ]] || { echo "missing local model ${BASE_MODEL} (download.txt)" >&2; exit 1; }
+[[ -d "${MODEL}" ]] || { echo "missing checkpoint ${MODEL}" >&2; exit 1; }
 
 BENCHMARKS="math500,aime24,aime25,amc12"
 PROTOCOL=palign

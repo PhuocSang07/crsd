@@ -17,9 +17,18 @@ DEV_SIZE = 200
 
 
 def _dataset_path(repo_id: str, local_dir_name: str) -> str:
-    """BENCH_DATA_ROOT/<local_dir_name> when that mirror exists (offline server, see download.txt), else the HF id."""
-    local = f"{BENCH_DATA_ROOT}/{local_dir_name}" if BENCH_DATA_ROOT else None
-    return local if local and os.path.isdir(local) else repo_id
+    """BENCH_DATA_ROOT/<local_dir_name> (offline server: mirrors downloaded by hand, see download.txt).
+
+    With BENCH_DATA_ROOT set a missing mirror is an error, never a silent fall back to the Hub (network egress is
+    blocked there). BENCH_DATA_ROOT="" means the HF id, resolved from the local HF cache under HF_HUB_OFFLINE=1.
+    """
+    if not BENCH_DATA_ROOT:
+        return repo_id
+    local = f"{BENCH_DATA_ROOT}/{local_dir_name}"
+    if not os.path.isdir(local):
+        raise FileNotFoundError(f"missing local mirror {local} of {repo_id} (download.txt: --hf-dataset {repo_id} "
+                                f"<BENCH_DATA_ROOT>/{local_dir_name})")
+    return local
 
 
 def _records(rows, question_key: str, answer_key: str) -> list[dict]:
