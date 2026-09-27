@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Phase 3: CSRD training (read mode) -- DeepSeek-R1-Distill-Qwen-1.5B student, Qwen3-8B teacher signals on s1K-1.1.
-# Same engine and config as SpectralGuidedLearning/scripts/spectral/spectral_lora_r1-qwen-1.5b.sh (train_sft.py +
-# DeepSpeed ZeRO-2 offload, LoRA r16/alpha16 all-linear, lr 5e-5 -> 1e-5 cosine, warmup 0.1, 3 epochs, effective
-# batch 32, seed 42, 32k tokens) on the same s1K-1.1 text; only the CSRD block below differs:
-#   L = L_CE + lambda * L_route + 0.1 * lambda * L_mass   (L_causal off: that is CSRD-C)
-# lambda = 0.1 by default: at 0.3 the routing gradient is ~7x the CE gradient (pilot logs), at 0.1 ~2.5x.
+# Phase 3: CSRD training (read mode) -- DeepSeek-R1-Distill-Qwen-1.5B track, Qwen3-8B teacher signals on s1K-1.1.
+# Same config as SGL spectral_lora_r1-qwen-1.5b.sh plus L = L_CE + lambda * L_route + 0.1 * lambda * L_mass.
+# Env: GPUS, CSRD_LAMBDA (0.1), CSRD_MASS_RATIO (0.1), CSRD_BANDS ("0,1"; "0" = middle band only), CSRD_D_MIN (4, needs
+# the matching signals/q8b-s1k11-dmin<D>-excess_bg.safetensors), CSRD_GRAD_LOG_INTERVAL (20), SEED (42), LR, MIN_LR,
+# DS_CONFIG (SGL's ZeRO-2 offload config; "" = plain DDP, e.g. when nvcc is missing).
 set -euo pipefail
 
 read -ra GPUS <<< "${GPUS:-0}"
 export CUDA_VISIBLE_DEVICES=$(IFS=,; echo "${GPUS[*]}")
 export TOKENIZERS_PARALLELISM=false
-# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
-# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping.
+# Offline server: models/data come from the download.txt mirrors; no HF Hub access, no vLLM usage stats.
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -58,14 +56,22 @@ if (( EFFECTIVE_BATCH % GPUS_PER_NODE != 0 )); then
 fi
 
 CSRD_LAMBDA="${CSRD_LAMBDA:-0.1}"
+CSRD_MASS_RATIO="${CSRD_MASS_RATIO:-0.1}"
+CSRD_BANDS="${CSRD_BANDS:-0,1}"
+CSRD_D_MIN="${CSRD_D_MIN:-4}"
 SEED="${SEED:-42}"
-TAG="csrd-lora-l${CSRD_LAMBDA}-r1-qwen-1.5b"
+VARIANT=""
+[[ "${CSRD_MASS_RATIO}" != 0.1 ]] && VARIANT+="-m${CSRD_MASS_RATIO}"
+[[ "${CSRD_BANDS}" == 0 ]] && VARIANT+="-b1"
+[[ "${CSRD_BANDS}" == 1 ]] && VARIANT+="-b2"
+[[ "${CSRD_D_MIN}" != 4 ]] && VARIANT+="-d${CSRD_D_MIN}"
+TAG="csrd-lora-l${CSRD_LAMBDA}${VARIANT}-r1-qwen-1.5b"
 [[ "${SEED}" != 42 ]] && TAG+="-s${SEED}"
 
 LOCAL_MODELS_ROOT="${LOCAL_MODELS_ROOT:-/mnt/local/_models/aiskylimit_new_nothingnew_2}"
 MODEL_NAME="${LOCAL_MODELS_ROOT}/DeepSeek-R1-Distill-Qwen-1.5B"
 DATA_PATH="${BASE_PATH}/data/records/s1k11-DeepSeek-R1-Distill-Qwen-1.5B-sgl.jsonl"
-SIGNALS_PATH="${BASE_PATH}/signals/q8b-s1k11-dmin4-excess_bg.safetensors"
+SIGNALS_PATH="${BASE_PATH}/signals/q8b-s1k11-dmin${CSRD_D_MIN}-excess_bg.safetensors"
 OUTPUT_DIR="${BASE_PATH}/checkpoints/${TAG}"
 EPOCHS=3
 LR="${LR:-5.0e-5}"
@@ -82,19 +88,16 @@ LORA_R=16
 LORA_ALPHA=16
 LORA_DROPOUT=0.05
 LORA_TARGET_MODULES="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
-DS_CONFIG="${BASE_PATH}/configs/deepspeed/ds_config_zero2_offload.json"
+DS_CONFIG="${DS_CONFIG-${BASE_PATH}/configs/deepspeed/ds_config_zero2_offload.json}"
 MAX_SEQ_LEN=32768
 
-# CSRD (Sec. 4): receiver heads K_S = 16 per band, chosen from the student's own attention after a CE-only warmup
-# (first 10% of steps, lambda = 0), then lambda ramps linearly over the next 10%. m = 8 queries per row.
-CSRD_MASS_RATIO=0.1
+# Student receiver heads are picked after a CE-only warmup (10% of steps); lambda then ramps over the next 10%.
 CSRD_CAUSAL_RATIO=0
-CSRD_D_MIN=4
 CSRD_QUERIES=8
 CSRD_K_STUDENT=16
 CSRD_WARMUP_FRAC=0.1
 CSRD_RAMP_FRAC=0.1
-CSRD_GRAD_LOG_INTERVAL=20
+CSRD_GRAD_LOG_INTERVAL="${CSRD_GRAD_LOG_INTERVAL:-20}"
 
 [[ -d "${MODEL_NAME}" ]] || { echo "missing local model ${MODEL_NAME} (download.txt)" >&2; exit 1; }
 [[ -f "${DATA_PATH}" ]] || { echo "missing ${DATA_PATH}: run scripts/data/data_r1-qwen-1.5b.sh first" >&2; exit 1; }
@@ -124,7 +127,7 @@ OPTS+=" --lora-r ${LORA_R}"
 OPTS+=" --lora-alpha ${LORA_ALPHA}"
 OPTS+=" --lora-dropout ${LORA_DROPOUT}"
 OPTS+=" --lora-target-modules ${LORA_TARGET_MODULES}"
-OPTS+=" --deepspeed-config ${DS_CONFIG}"
+[[ -n "${DS_CONFIG}" ]] && OPTS+=" --deepspeed-config ${DS_CONFIG}"
 OPTS+=" --max-seq-len ${MAX_SEQ_LEN}"
 OPTS+=" --gradient-checkpointing"
 OPTS+=" --metrics-log ${BASE_PATH}/logs/metrics-${TAG}.json"
@@ -133,6 +136,7 @@ OPTS+=" --csrd-lambda ${CSRD_LAMBDA}"
 OPTS+=" --csrd-mass-ratio ${CSRD_MASS_RATIO}"
 OPTS+=" --csrd-causal-ratio ${CSRD_CAUSAL_RATIO}"
 OPTS+=" --csrd-d-min ${CSRD_D_MIN}"
+OPTS+=" --csrd-bands ${CSRD_BANDS}"
 OPTS+=" --csrd-queries ${CSRD_QUERIES}"
 OPTS+=" --csrd-k-student ${CSRD_K_STUDENT}"
 OPTS+=" --csrd-warmup-frac ${CSRD_WARMUP_FRAC}"

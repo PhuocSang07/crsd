@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# Phase 2: teacher signals (read mode) -- Qwen3-8B teacher-forced on s1K-1.1 (its own thinking rendering).
-#   calibrate receiver scores of every head on D_cal (first 200 traces) -> top-16 heads per depth band (excess
-#   kurtosis after background subtraction) -> far routing targets P, Z on all 1000 traces -> ONE signal bank.
-# The bank depends on (teacher, data) only, never on the student: any student whose records carry the same step
-# nodes trains from it. A bank copied from another machine is reused as is (delete it to rebuild).
+# Phase 2: teacher signal bank (read mode) -- Qwen3-8B on s1K-1.1, reused by any student with the same records.
+# Env: GPUS (one shard per GPU), D_MIN (4; the heads are shared, only the targets differ). An existing bank is reused as is.
 set -euo pipefail
 
 read -ra GPUS <<< "${GPUS:-0}"
 export TOKENIZERS_PARALLELISM=false
-# Offline server (network egress is blocked and audited): models/data come from the local mirrors listed in
-# download.txt; never contact the HF Hub, and turn off vLLM's usage-stats ping.
+# Offline server: models/data come from the download.txt mirrors; no HF Hub access, no vLLM usage stats.
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -36,12 +32,13 @@ LOCAL_MODELS_ROOT="${LOCAL_MODELS_ROOT:-/mnt/local/_models/aiskylimit_new_nothin
 MODEL_NAME="${LOCAL_MODELS_ROOT}/Qwen3-8B"
 DATA_PATH="data/records/s1k11-Qwen3-8B-thinking.jsonl"
 ROUTING_DIR="data/teacher/q8b-s1k11/routing"
-TARGETS_DIR="data/teacher/q8b-s1k11/targets-dmin4-excess_bg"
-SIGNALS_PATH="signals/q8b-s1k11-dmin4-excess_bg.safetensors"
+D_MIN="${D_MIN:-4}"
+TARGETS_DIR="data/teacher/q8b-s1k11/targets-dmin${D_MIN}-excess_bg"
+SIGNALS_PATH="signals/q8b-s1k11-dmin${D_MIN}-excess_bg.safetensors"
 SOURCE_NAME=s1k11
 N_CAL=200
 K_PER_BAND=16
-D_MIN=4
+CAL_D_MIN=4
 SCORE=excess_bg
 [[ -f "${DATA_PATH}" ]] || { echo "missing ${DATA_PATH}: run scripts/data/data_r1-qwen-1.5b.sh first" >&2; exit 1; }
 
@@ -52,7 +49,7 @@ if [[ -s "${SIGNALS_PATH}" ]]; then
 fi
 [[ -d "${MODEL_NAME}" ]] || { echo "missing local model ${MODEL_NAME} (download.txt)" >&2; exit 1; }
 
-run_shards() {  # run_shards NAME args...: one process per GPU (--num-shards/--shard-index), wait for all
+run_shards() {  # run_shards NAME args...: one shard per GPU, wait for all
   local name=$1; shift
   local num_shards=${#GPUS[@]} pids=() shard_fail=0
   echo ">>> launching ${num_shards} shards (one per GPU: ${GPUS[*]}) of ${BASE_PATH}/src/extract_routing.py $1 $2"
@@ -67,8 +64,10 @@ run_shards() {  # run_shards NAME args...: one process per GPU (--num-shards/--s
   [[ ${shard_fail} -eq 0 ]] || exit 1
 }
 
-# 1. calibration, sharded over the traces. Shards from another GPU count would leave D_cal incomplete: redo.
+# Heads are selected once (at d_min 4) and shared by every d_min bank. Calibration shards from another GPU count would
+# leave D_cal incomplete: redo them.
 NUM_SHARDS=${#GPUS[@]}
+if [[ ! -f "${ROUTING_DIR}/heads-${SCORE}.json" ]]; then
 if [[ $(ls "${ROUTING_DIR}"/calib-shard*of${NUM_SHARDS}.npz 2>/dev/null | wc -l) -ne ${NUM_SHARDS} \
       || $(ls "${ROUTING_DIR}"/calib-*.npz 2>/dev/null | wc -l) -ne ${NUM_SHARDS} ]]; then
   rm -f "${ROUTING_DIR}"/calib-*.npz
@@ -78,11 +77,10 @@ if [[ $(ls "${ROUTING_DIR}"/calib-shard*of${NUM_SHARDS}.npz 2>/dev/null | wc -l)
   OPTS+=" --data-path ${DATA_PATH}"
   OPTS+=" --output-dir ${ROUTING_DIR}"
   OPTS+=" --n-traces ${N_CAL}"
-  OPTS+=" --d-min ${D_MIN}"
+  OPTS+=" --d-min ${CAL_D_MIN}"
   run_shards calibrate ${OPTS}
 fi
 
-# 2. head selection (CPU): merges the calibration shards
 OPTS=""
 OPTS+=" --stage select"
 OPTS+=" --output-dir ${ROUTING_DIR}"
@@ -92,8 +90,8 @@ CMD="python ${BASE_PATH}/src/extract_routing.py ${OPTS}"
 echo "${CMD}"
 ${CMD} 2>&1 | tee logs/q8b-s1k11-select-heads.log
 echo ">>> STOP AND READ ${ROUTING_DIR}/selection-summary.json: split-half stability (this box: 0.998) and score agreement."
+fi
 
-# 3. routing targets on every trace (resumable: finished traces are skipped)
 OPTS=""
 OPTS+=" --stage targets"
 OPTS+=" --model-name ${MODEL_NAME}"
@@ -102,11 +100,10 @@ OPTS+=" --heads-json ${ROUTING_DIR}/heads-${SCORE}.json"
 OPTS+=" --output-dir ${TARGETS_DIR}"
 OPTS+=" --d-min ${D_MIN}"
 OPTS+=" --source-name ${SOURCE_NAME}"
-run_shards targets ${OPTS}
+run_shards targets-dmin${D_MIN} ${OPTS}
 
-# 4. pack into the reusable bank
 CMD="python ${BASE_PATH}/src/signal_bank.py pack --targets-dir ${TARGETS_DIR} --output ${SIGNALS_PATH}"
 echo "${CMD}"
-${CMD} 2>&1 | tee logs/q8b-s1k11-pack.log
+${CMD} 2>&1 | tee logs/q8b-s1k11-dmin${D_MIN}-pack.log
 
 echo ">>> STOP AND READ: 'packed 1000 traces' above (one per s1K-1.1 record)."
