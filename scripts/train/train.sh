@@ -54,7 +54,7 @@ else
   [[ "${D_MIN}" != 4 ]] && VARIANT+="-d${D_MIN}"
   TAG="${ARM}-l${LAMBDA}${VARIANT}-${TRACK}-s${SEED}"
   [[ -s "${BANK}" ]] || { echo "missing signal bank ${BANK} (scripts/targets/teacher_signals.sh ${TRACK})" >&2; exit 2; }
-  CSRD_OPTS+=" --csrd-lambda ${LAMBDA} --signals ${BANK} --csrd-d-min ${D_MIN} --csrd-queries ${QUERIES} --csrd-k-student 16"
+  CSRD_OPTS+=" --csrd-lambda ${LAMBDA} --signal-bank ${BANK} --csrd-d-min ${D_MIN} --csrd-queries ${QUERIES} --csrd-k-student 16"
   CSRD_OPTS+=" --csrd-warmup-frac 0.1 --csrd-ramp-frac 0.1 --csrd-grad-log-interval 20"
 fi
 OUTPUT_DIR="checkpoints/${TAG}"

@@ -96,7 +96,7 @@ def main() -> None:
     common = ["--model-name", str(student), "--data-path", s_rec, "--max-steps", "6",
               "--gradient-accumulation-steps", "2", "--logging-steps", "1", "--save-strategy", "no",
               "--lora-r", "4", "--lora-alpha", "4", "--learning-rate", "1e-3", "--ce-chunk", "64"]
-    csrd = ["--csrd-lambda", "1.0", "--signals", str(bank), "--csrd-k-student", "2",
+    csrd = ["--csrd-lambda", "1.0", "--signal-bank", str(bank), "--csrd-k-student", "2",
             "--csrd-warmup-frac", "0.34", "--csrd-ramp-frac", "0.17", "--csrd-grad-log-interval", "1"]
     run(f"{s}/train_sft.py", *common, "--output-dir", str(work / "ckpt-sft"))
     run(f"{s}/train_sft.py", *common, *csrd, "--output-dir", str(work / "ckpt-csrd"), "--csrd-anchor-beta", "1.0",

@@ -175,9 +175,10 @@ def main() -> None:
     parser.add_argument("--lora-target-modules")
     # CSRD
     parser.add_argument("--csrd-lambda", type=float, help="lambda_r (0/unset = plain SFT)")
-    parser.add_argument("--signals", help="teacher signals: a packed bank (.safetensors, signal_bank.py) or a "
-                        "targets dir (extract_routing.py --stage targets)")
-    parser.add_argument("--causal-dir", help="causal targets dir (causal_targets.py), when --signals is a targets dir")
+    # not "--signals": under torchrun that is an ambiguous prefix of its own --signals-to-handle / --signals_to_handle
+    parser.add_argument("--signal-bank", "--signals", dest="signals", help="teacher signals: a packed bank (.safetensors, "
+                        "signal_bank.py) or a targets dir (extract_routing.py --stage targets)")
+    parser.add_argument("--causal-dir", help="causal targets dir (causal_targets.py), when --signal-bank is a targets dir")
     parser.add_argument("--csrd-mass-ratio", type=float, help="lambda_m / lambda_r (default 0.1; 0 = A7)")
     parser.add_argument("--csrd-causal-ratio", type=float, help="lambda_c / lambda_r (default 1.0; 0 = ignore the causal "
                         "targets a signal bank carries -- every arm except CSRD-C)")
@@ -217,7 +218,7 @@ def main() -> None:
         parser.error(f"missing required settings: {missing}")
     use_csrd = config["csrd_lambda"] > 0
     if use_csrd and not config.get("signals"):
-        parser.error("--csrd-lambda > 0 needs --signals")
+        parser.error("--csrd-lambda > 0 needs --signal-bank")
     if use_csrd:
         from signal_bank import SignalSource
 
