@@ -11,6 +11,7 @@ Teacher and student records are both built from this one file (data_prep.py), so
 """
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -62,8 +63,11 @@ def from_openr1(dataset_name: str | None, limit: int, seed: int) -> list[dict]:
         parts = split_response(row["generations"][picks[0]])
         if not parts["closed"] or not parts["answer"]:
             continue
+        uuid = row.get("uuid")
+        if not isinstance(uuid, str) or not uuid or uuid.lower() == "nan":  # a few rows have no uuid
+            uuid = "h" + hashlib.sha1(row["problem"].encode("utf-8")).hexdigest()[:16]
         out.append({
-            "id": f"openr1-{row['uuid']}",
+            "id": f"openr1-{uuid}",
             "question": nfc(row["problem"]),
             "thinking": nfc(parts["thinking"]),
             "answer": nfc(parts["answer"]),
@@ -121,6 +125,10 @@ def main() -> None:
             parser.error("--source jsonl needs --input")
         records = from_jsonl(args.input)
     records = [r for r in records if r["thinking"]]
+    ids = [r["id"] for r in records]
+    if len(ids) != len(set(ids)):  # ids key every downstream file (records, signal banks, results)
+        dup = sorted({i for i in ids if ids.count(i) > 1})
+        raise SystemExit(f"duplicate trace ids: {dup[:5]}")
     output = Path(args.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w") as handle:
@@ -128,6 +136,14 @@ def main() -> None:
             handle.write(json.dumps(record) + "\n")
     closed = sum(r["closed"] for r in records)
     print(f"wrote {len(records)} canonical traces ({closed} closed) -> {output}")
+    if args.source == "openr1":
+        # The HF streaming reader's background threads abort the interpreter at shutdown ("PyGILState_Release"),
+        # turning a finished run into exit code 134. Everything is written and flushed: leave immediately.
+        import os
+        import sys
+
+        sys.stdout.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":
