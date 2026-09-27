@@ -314,7 +314,8 @@ class CSRDLossMixin:
         device = far.device
         weights = 1.0 + self.csrd_anchor_beta * targets["anchor"].to(device)
         C_tilde = support = None
-        if "C" in targets:
+        # the signal bank carries causal targets for the causal subset; only CSRD-C (lambda_c > 0) uses them
+        if "C" in targets and self.csrd_causal_ratio > 0:
             C_tilde, support = causal_target(targets["C"].to(device), targets["J"].to(device), far)
         L_route = L_mass = L_causal = torch.zeros((), device=device)
         stats = defaultdict(float)

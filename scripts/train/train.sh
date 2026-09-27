@@ -36,7 +36,9 @@ QUERIES="${QUERIES:-8}"
 DS_CONFIG="${DS_CONFIG-${BASE_PATH}/configs/deepspeed/ds_config_zero2_offload.json}"
 BANK="${SIGNALS}"
 
+# L_causal belongs to CSRD-C only (Sec. 4.9): the bank also carries causal targets, so every other arm sets lambda_c = 0.
 CSRD_OPTS=""
+[[ "${ARM}" != csrd-c && "${ARM}" != csrd-causalonly ]] && CSRD_OPTS+=" --csrd-causal-ratio 0"
 case "${ARM}" in
   sft|csrd) ;;
   csrd-a) CSRD_OPTS+=" --csrd-anchor-beta 1.0" ;;

@@ -181,7 +181,8 @@ def main() -> None:
                         "targets dir (extract_routing.py --stage targets)")
     parser.add_argument("--causal-dir", help="causal targets dir (causal_targets.py), when --signals is a targets dir")
     parser.add_argument("--csrd-mass-ratio", type=float, help="lambda_m / lambda_r (default 0.1; 0 = A7)")
-    parser.add_argument("--csrd-causal-ratio", type=float, help="lambda_c / lambda_r (default 1.0)")
+    parser.add_argument("--csrd-causal-ratio", type=float, help="lambda_c / lambda_r (default 1.0; 0 = ignore the causal "
+                        "targets a signal bank carries -- every arm except CSRD-C)")
     parser.add_argument("--csrd-route-ratio", type=float, help="L_route weight / lambda_r (default 1.0; 0 = A3 causal only)")
     parser.add_argument("--csrd-bands", help="bands in the loss: '0,1' (default), '0' = B1, '1' = B2 (A4)")
     parser.add_argument("--csrd-d-min", type=int, help="far threshold in steps (default 4; must match targets)")
