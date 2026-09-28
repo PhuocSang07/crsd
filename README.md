@@ -122,6 +122,34 @@ seed 42, 32k token — y hệt arm spectral-lora của SGL, chỉ thêm khối `
 chép `signals/q8b-s1k11-dmin4-excess_bg.safetensors` sang máy mới để bỏ qua Phase 2. SFT đối chứng = arm vanilla của SGL
 (chép `results/vanilla-r1-qwen-1.5b` của SGL vào `results-palign/` để `compare_results.py` kiểm định cặp).
 
+### MC-CSRD v4 (`MC_CSRD_proposal_v4.tex`): cùng track, mục tiêu khớp khối lượng thô
+
+Khác v3 ở ba chỗ: (1) teacher lưu thêm `M` = khối lượng attention thô gộp đúng thứ tự (trung bình m trước khi chuẩn hóa,
+`E[z r] ≠ E[z] E[r]`), bank mới `signals/q8b-s1k11-dmin4-excess_bg-mc.safetensors`; (2) loss phụ là KL đầy đủ trên
+{REST} ∪ F(i) (`--csrd-objective mc_raw`), thay cho `L_route + 0.1 L_mass`; (3) quy ước chung cho mọi arm: trung bình qua band
+(`--csrd-band-reduction mean`, nên λ 0.2 = λ 0.1 của v3), trọng số query không chệch (`--csrd-query-weighting unbiased`),
+một bộ head student cố định (của b0) cho cả train lẫn chẩn đoán.
+
+| Arm | `--csrd-objective` | Câu hỏi |
+|---|---|---|
+| b0 | `none` (SFT, vẫn log Z/ΔM) | mức CE-only; chọn head sau warmup, probe norm gradient mọi objective (`csrd-norm-probe.json`) |
+| b1 | `route_mass` | objective v3, cùng cache/head/query/reduction |
+| b2 | `mc_syn` | chỉ đổi coupling trên thống kê cũ (Z·P) |
+| b3 | `mc_raw` | phương pháp đề xuất |
+| b4 | `route_mass`, λ = 0.2 × tỉ lệ norm b3/b1 tại bước đầu sau warmup | b3 có lợi chỉ vì gradient phụ yếu hơn? |
+
+```bash
+GPUS="0" bash project_commands_mc_csrd_r1-qwen-1.5b.sh   # G0 (pytest) -> bank -mc -> mỗi arm b0,b3,b1,b4,b2: train -> eval 4k
+                                                          # (4 benchmark, results-palign/) -> eval 32k AIME24+25 (results-32k-aime/)
+                                                          # -> model gốc (EVAL_BASE=0 để bỏ) -> so sánh -> chẩn đoán held-out
+ARM=b3 bash scripts/csrd/mc_csrd_lora_r1-qwen-1.5b.sh    # một arm (b1-b4 cần head của b0)
+bash scripts/diag/diag_mass_r1-qwen-1.5b.sh              # H1: E_Z, ΔM theo bin, KL_raw trên 300 trace held-out, CI ghép cặp vs b1
+```
+
+Chẩn đoán held-out cần `data/canonical/openr1-heldout.jsonl` (5 MB, chép từ máy dev) hoặc bản mirror OpenR1-Math-220k.
+Log train có thêm `csrd_ez_b*` (|Z_S − Z_T|), `csrd_dM_<bin>` (ΔM không điều kiện), `csrd_mcber_b*` + `csrd_mccond_b*`
+(= `loss_mc_raw` theo chain rule), `grad_{ce,route}_{qk,vo,mlp}`. Với head cố định, các chỉ số này có từ bước 0 (cả warmup).
+
 Kiểm thử (CPU): `python -m pytest tests -q` và
 `python scripts/smoke_test_pipeline.py --teacher-tokenizer <tokenizer R1-Distill> --student-tokenizer <tokenizer Qwen3>`.
 

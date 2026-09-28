@@ -9,10 +9,12 @@ whose records (data_prep.py --style sgl) carry the same node hashes. Per trace:
 
     <id>/P      float32 [bands, N, N]  band-averaged far routing (rows over F(i), lower triangular)
     <id>/Z      float32 [bands, N]     far mass
+    <id>/M      float32 [bands, N, N]  raw far mass D_T (MC-CSRD; banks extracted before v4 have none)
     <id>/rows   uint8   [N]            rows with |F(i)| >= 2
     <id>/hash   int64   [N]            node text hashes (prompting.text_hash)
     <id>/C, <id>/J, <id>/floor         causal targets, when the trace is in the causal subset
-Header metadata: teacher, source, style, segmentation, d_min, receiver score, head list.
+Header metadata: teacher, source, style, segmentation, d_min, receiver score, head list and, with M, the cache
+quality of v4 Table 3 (row-sum error of M vs Z, and how far the synthetic Z * P is from M).
 """
 
 import argparse
@@ -22,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-PER_TRACE = ("P", "Z", "rows", "hash")
+PER_TRACE = ("P", "Z", "M", "rows", "hash")
 CAUSAL = ("C", "J", "floor")
 FORMAT = "crsd-signal-bank/1"
 
@@ -85,11 +87,14 @@ def pack(targets_dir: str, causal_dir: str | None, output: str) -> None:
     from safetensors.numpy import save_file
 
     source = SignalSource(targets_dir, causal_dir)
-    tensors, n_causal = {}, 0
+    tensors, n_causal, quality = {}, 0, []
     for trace_id in source.ids():
         data = source.get(trace_id)
         tensors[f"{trace_id}/P"] = data["P"].astype(np.float32)
         tensors[f"{trace_id}/Z"] = data["Z"].astype(np.float32)
+        if "M" in data:
+            tensors[f"{trace_id}/M"] = data["M"].astype(np.float32)
+            quality.append(raw_mass_quality(data))
         tensors[f"{trace_id}/rows"] = data["rows"].astype(np.uint8)
         tensors[f"{trace_id}/hash"] = data["hash"].astype(np.int64)
         if "C" in data:
@@ -98,9 +103,15 @@ def pack(targets_dir: str, causal_dir: str | None, output: str) -> None:
             tensors[f"{trace_id}/J"] = data["J"].astype(np.int64)
             if "floor" in data:
                 tensors[f"{trace_id}/floor"] = data["floor"].astype(np.float32)
-    info = {**source.info, "traces": len(source.ids()), "causal_traces": n_causal,
+    info = {**source.info, "traces": len(source.ids()), "causal_traces": n_causal, "raw_mass_traces": len(quality),
             "packed_at": time.strftime("%Y-%m-%d %H:%M:%S"), "targets_dir": str(targets_dir),
             "causal_dir": str(causal_dir) if causal_dir else None}
+    if quality:
+        info["raw_mass_quality"] = {
+            "max_abs_row_sum_error": float(max(q["row_sum_error"] for q in quality)),
+            "mean_l1_synthetic_vs_raw": np.mean([q["l1_synthetic_vs_raw"] for q in quality], axis=0).tolist(),
+            "mean_kl_P_vs_raw_conditional": np.mean([q["kl_P_vs_raw_conditional"] for q in quality], axis=0).tolist(),
+        }
     heads_json = source.info.get("heads_json")
     if heads_json and Path(heads_json).exists():
         info["heads"] = json.loads(Path(heads_json).read_text())["heads"]
@@ -108,6 +119,23 @@ def pack(targets_dir: str, causal_dir: str | None, output: str) -> None:
     save_file(tensors, output, metadata={"format": FORMAT, "info": json.dumps(info)})
     size = Path(output).stat().st_size / 2**20
     print(f"packed {len(source.ids())} traces ({n_causal} with causal targets), {size:.1f} MB -> {output}")
+
+
+def raw_mass_quality(data: dict[str, np.ndarray]) -> dict:
+    """Per band over valid rows: |sum_j M - Z| (should be float noise), mean L1 between the synthetic Z * P and M
+    (v4 Prop. covariance: they differ by Cov(z, r)), and KL(P || M / Z) between the two conditionals."""
+    P, Z, M = (np.asarray(data[k], dtype=np.float64) for k in ("P", "Z", "M"))
+    rows = np.asarray(data["rows"]).astype(bool)
+    if not rows.any():
+        return {"row_sum_error": 0.0, "l1_synthetic_vs_raw": [0.0] * P.shape[0], "kl_P_vs_raw_conditional": [0.0] * P.shape[0]}
+    raw_conditional = M / np.maximum(M.sum(-1, keepdims=True), 1e-12)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kl = np.where(P > 0, P * (np.log(np.maximum(P, 1e-12)) - np.log(np.maximum(raw_conditional, 1e-12))), 0.0).sum(-1)
+    return {
+        "row_sum_error": float(np.abs(M.sum(-1) - Z)[:, rows].max()),
+        "l1_synthetic_vs_raw": np.abs(Z[..., None] * P - M).sum(-1)[:, rows].mean(-1).tolist(),
+        "kl_P_vs_raw_conditional": kl[:, rows].mean(-1).tolist(),
+    }
 
 
 def main() -> None:

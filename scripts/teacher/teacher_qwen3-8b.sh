@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Phase 2: teacher signal bank (read mode) -- Qwen3-8B on s1K-1.1, reused by any student with the same records.
-# Env: GPUS (one shard per GPU), D_MIN (4; the heads are shared, only the targets differ). An existing bank is reused as is.
+# Env: GPUS (one shard per GPU), D_MIN (4; the heads are shared, only the targets differ), BANK_SUFFIX ("" = the v3 bank;
+# "-mc" = a new bank for MC-CSRD v4: v3 banks carry no raw mass M, and a finished bank is reused as is).
 set -euo pipefail
 
 read -ra GPUS <<< "${GPUS:-0}"
@@ -33,8 +34,9 @@ MODEL_NAME="${LOCAL_MODELS_ROOT}/Qwen3-8B"
 DATA_PATH="data/records/s1k11-Qwen3-8B-thinking.jsonl"
 ROUTING_DIR="data/teacher/q8b-s1k11/routing"
 D_MIN="${D_MIN:-4}"
-TARGETS_DIR="data/teacher/q8b-s1k11/targets-dmin${D_MIN}-excess_bg"
-SIGNALS_PATH="signals/q8b-s1k11-dmin${D_MIN}-excess_bg.safetensors"
+BANK_SUFFIX="${BANK_SUFFIX:-}"
+TARGETS_DIR="data/teacher/q8b-s1k11/targets-dmin${D_MIN}-excess_bg${BANK_SUFFIX}"
+SIGNALS_PATH="signals/q8b-s1k11-dmin${D_MIN}-excess_bg${BANK_SUFFIX}.safetensors"
 SOURCE_NAME=s1k11
 N_CAL=200
 K_PER_BAND=16
@@ -100,10 +102,11 @@ OPTS+=" --heads-json ${ROUTING_DIR}/heads-${SCORE}.json"
 OPTS+=" --output-dir ${TARGETS_DIR}"
 OPTS+=" --d-min ${D_MIN}"
 OPTS+=" --source-name ${SOURCE_NAME}"
-run_shards targets-dmin${D_MIN} ${OPTS}
+run_shards targets-dmin${D_MIN}${BANK_SUFFIX} ${OPTS}
 
 CMD="python ${BASE_PATH}/src/signal_bank.py pack --targets-dir ${TARGETS_DIR} --output ${SIGNALS_PATH}"
 echo "${CMD}"
-${CMD} 2>&1 | tee logs/q8b-s1k11-dmin${D_MIN}-pack.log
+${CMD} 2>&1 | tee logs/q8b-s1k11-dmin${D_MIN}${BANK_SUFFIX}-pack.log
 
-echo ">>> STOP AND READ: 'packed 1000 traces' above (one per s1K-1.1 record)."
+echo ">>> STOP AND READ: 'packed 1000 traces' above (one per s1K-1.1 record); for -mc, raw_mass_quality in"
+echo ">>> 'python src/signal_bank.py info ${SIGNALS_PATH}' (max_abs_row_sum_error ~1e-6)."

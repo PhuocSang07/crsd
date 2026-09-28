@@ -8,6 +8,11 @@ For a head (l, h) and a query token t of step i (Definition 1):
 
 Rows average *already normalized* per-query distributions, R[i] = mean_{t in Q(i)} R_t (Lemma 1 exact
 per query). Only rows with |F(i)| >= 2 enter any loss. Plain torch, no model or Trainer.
+
+MC-CSRD (proposal v4, Sec. 4-5) pools the raw mass instead: D[i, j] = mean_c m_c(j) over components c (head,
+query) and D[i, REST] = 1 - sum_{j in F(i)} D[i, j], where REST holds every other key under the causal mask
+(near steps, the current step, template and special tokens). Far-mass matrices "far" below are D restricted to
+F(i) ([N, N], 0 outside F(i)); their row sums are the far mass Z.
 """
 
 import math
@@ -65,6 +70,36 @@ def row_average(values: torch.Tensor, query_rows: torch.Tensor, num_nodes: int) 
     return sums / counts.clamp_min(1).view(shape), counts
 
 
+def weighted_row_sum(values: torch.Tensor, query_rows: torch.Tensor, weights: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """sum_t w_t values_t over each row's queries -> [N, ...] (the row's weighted mean when its weights sum to 1)."""
+    w = weights.to(values.dtype).view((-1,) + (1,) * (values.dim() - 1))
+    return values.new_zeros((num_nodes, *values.shape[1:])).index_add(0, query_rows, values * w)
+
+
+def query_weights(node_spans: torch.Tensor, positions: torch.Tensor, query_rows: torch.Tensor,
+                  mode: str = "unbiased") -> torch.Tensor:
+    """Per-query weights [Nq], summing to 1 over each row's sampled queries.
+
+    "uniform": 1/m_i (plain mean of the sample). "unbiased" (v4 Eq. querysampling): the teacher averages all n_i
+    tokens of the step uniformly, while the student always samples the last token plus m_i - 1 of the other
+    n_i - 1 without replacement; weighting the last token 1/n_i and each other one (n_i - 1)/(n_i (m_i - 1))
+    makes the pooled mass an unbiased estimate of that uniform mean. A row sampled in full gets 1/n_i per token;
+    a single-query row (m = 1) keeps weight 1 (no unbiased estimate exists).
+    """
+    counts = torch.bincount(query_rows, minlength=node_spans.size(0)).to(torch.float64)
+    m = counts[query_rows]
+    if mode == "uniform":
+        return (1.0 / m).float()
+    if mode != "unbiased":
+        raise ValueError(f"unknown query weighting {mode!r}")
+    spans = node_spans[query_rows]
+    n = (spans[:, 1] - spans[:, 0]).to(torch.float64)
+    last = positions == spans[:, 1] - 1
+    w = torch.where(last, 1.0 / n, (n - 1) / (n * (m - 1).clamp_min(1)))
+    w = torch.where(m >= n, 1.0 / n, w)
+    return torch.where(m == 1, torch.ones_like(w), w).float()
+
+
 def attention_probs(
     q: torch.Tensor, k: torch.Tensor, query_pos: torch.Tensor, scale: float
 ) -> torch.Tensor:
@@ -106,6 +141,33 @@ def head_query_routing(
     return _head_query_routing(*args)
 
 
+def _head_query_far_mass(q, k, query_pos, key_nodes, query_rows, far_mask, scale, num_nodes: int):
+    attn = attention_probs(q, k, query_pos, scale)
+    return node_mass(attn, key_nodes, num_nodes) * far_mask[query_rows].to(attn.dtype)
+
+
+def head_query_far_mass(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    query_pos: torch.Tensor,
+    key_nodes: torch.Tensor,
+    query_rows: torch.Tensor,
+    far_mask: torch.Tensor,
+    scale: float,
+    use_checkpoint: bool = False,
+) -> torch.Tensor:
+    """m_t(j) [Nq, N] of one head for sampled queries: raw mass on far node j (0 outside F(i)).
+
+    The softmax runs over the full causal support, so 1 - sum_j m_t(j) is the REST mass. Z_t and R_t of
+    head_query_routing are m_t.sum(-1) and m_t / Z_t. Differentiable in q and k.
+    """
+    num_nodes = far_mask.size(0)
+    args = (q, k, query_pos, key_nodes, query_rows, far_mask, scale, num_nodes)
+    if use_checkpoint and torch.is_grad_enabled() and (q.requires_grad or k.requires_grad):
+        return checkpoint(_head_query_far_mass, *args, use_reentrant=False)
+    return _head_query_far_mass(*args)
+
+
 @torch.no_grad()
 def head_row_routing_blockwise(
     q: torch.Tensor,
@@ -120,7 +182,8 @@ def head_row_routing_blockwise(
 
     q, k: [H, T, d] (post-RoPE, k matched to the query heads) or [T, d] for one head; peak memory
     H x block x T fp32. mean_distance is D5: d_h = E_t sum_u (t - u) A_{t,u}.
-    Returns R [H, N, N], Z [H, N], counts [N], mean_distance [H] (no H dim for 2-D input).
+    Returns R [H, N, N], Z [H, N], M [H, N, N] (raw far mass, MC-CSRD's D_T; row sums = Z), counts [N],
+    mean_distance [H] (no H dim for 2-D input). All are uniform means over the row's tokens.
     """
     single = q.dim() == 2
     if single:
@@ -131,6 +194,7 @@ def head_row_routing_blockwise(
     rows_ok = valid_rows(far_mask)
     positions = torch.nonzero((query_nodes >= 1) & rows_ok[query_nodes.clamp_min(0)], as_tuple=False).squeeze(-1)
     r_sum = q.new_zeros(heads, num_nodes, num_nodes, dtype=torch.float32)
+    m_sum = q.new_zeros(heads, num_nodes, num_nodes, dtype=torch.float32)
     z_sum = q.new_zeros(heads, num_nodes, dtype=torch.float32)
     counts = q.new_zeros(num_nodes, dtype=torch.float32)
     dist_sum = q.new_zeros(heads, dtype=torch.float32)
@@ -139,21 +203,24 @@ def head_row_routing_blockwise(
         pos = positions[start : start + block]
         rows = query_nodes[pos]
         attn = attention_probs(q[:, pos], k, pos, scale)  # [H, b, T]
-        r, z = query_routing(node_mass(attn, key_nodes, num_nodes), rows, far_mask)
-        r_sum.index_add_(1, rows, r)
+        far_mass = node_mass(attn, key_nodes, num_nodes) * far_mask[rows].to(attn.dtype)
+        z = far_mass.sum(-1)
+        r_sum.index_add_(1, rows, far_mass / z.clamp_min(EPS).unsqueeze(-1))
+        m_sum.index_add_(1, rows, far_mass)
         z_sum.index_add_(1, rows, z)
         counts.index_add_(0, rows, torch.ones_like(rows, dtype=torch.float32))
         dist_sum += (pos.float().unsqueeze(0) - attn @ key_pos).sum(-1)
-        del attn
+        del attn, far_mass
     denom = counts.clamp_min(1)
     out = {
         "R": r_sum / denom.view(1, -1, 1),
         "Z": z_sum / denom.view(1, -1),
+        "M": m_sum / denom.view(1, -1, 1),
         "counts": counts,
         "mean_distance": dist_sum / max(1, positions.numel()),
     }
     if single:
-        out.update(R=out["R"][0], Z=out["Z"][0], mean_distance=out["mean_distance"][0])
+        out.update(R=out["R"][0], Z=out["Z"][0], M=out["M"][0], mean_distance=out["mean_distance"][0])
     return out
 
 
@@ -225,6 +292,86 @@ def per_query_route_loss(
     keep = _bool_rows(rows, P)[query_rows]
     w = keep.float() if weights is None else keep.float() * weights[query_rows].float()
     return (per_query * w).sum() / w.sum().clamp_min(EPS)
+
+
+# ---------------------------------------------------------------- MC-CSRD (proposal v4)
+
+MASS_EPS = 1e-30  # floor of a pooled mass inside the log; hits are counted by the trainer (csrd_clamped)
+
+
+def with_rest(far: torch.Tensor) -> torch.Tensor:
+    """[..., N] far masses -> [..., 1 + N] distribution over {REST} U nodes (REST first)."""
+    far = _full(far)
+    return torch.cat([(1 - far.sum(-1, keepdim=True)).clamp_min(0), far], -1)
+
+
+def mc_kl_rows(far_T: torch.Tensor, far_S: torch.Tensor) -> torch.Tensor:
+    """KL(D_T || D_S) per row over {REST} U F(i) (v4 Eq. binarychain: KL(Ber(Z_T) || Ber(Z_S)) + Z_T KL(R_T || R_S))."""
+    p, q = with_rest(far_T), with_rest(far_S)
+    terms = torch.where(p > 0, p * (torch.log(p.clamp_min(MASS_EPS)) - torch.log(q.clamp_min(MASS_EPS))),
+                        torch.zeros_like(p))
+    return terms.sum(-1)
+
+
+def mc_loss(far_T: torch.Tensor, far_S: torch.Tensor, rows: torch.Tensor, weights: torch.Tensor | None = None) -> torch.Tensor:
+    """One band of L_MC (v4 Eq. mainloss): mean of mc_kl_rows over the given rows that carry teacher far mass."""
+    return weighted_row_mean(mc_kl_rows(far_T, far_S), _bool_rows(rows, far_T), weights)
+
+
+def synthetic_far(P: torch.Tensor, Z: torch.Tensor) -> torch.Tensor:
+    """MC-synthetic D^syn(j) = Z R(j) (v4 Eq. synthetic): the product of the two cached means, not a mean mass."""
+    return _full(P) * _full(Z).unsqueeze(-1)
+
+
+def mc_parts(far_T: torch.Tensor, far_S: torch.Tensor, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Chain-rule parts of mc_loss as row means: the Bernoulli far-mass term and the Z_T-weighted conditional term."""
+    rows = _bool_rows(rows, far_T)
+    far_T, far_S = _full(far_T), _full(far_S)
+    z_T, z_S = far_T.sum(-1), far_S.sum(-1)
+    R_T, R_S = far_T / z_T.clamp_min(EPS).unsqueeze(-1), far_S / z_S.clamp_min(EPS).unsqueeze(-1)
+    return weighted_row_mean(bernoulli_kl(z_T, z_S), rows), weighted_row_mean(z_T * kl_rows(R_T, R_S), rows)
+
+
+def mass_groups(far_mask: torch.Tensor, bins=DISTANCE_BINS) -> tuple[list[str], torch.Tensor]:
+    """(names, [G, N, N] bool) partitioning every F(i) into the question node and the distance bins (v4 Sec. 4.6).
+    Far targets nearer than the first bin (d_min < 4) form a last group "other"."""
+    num_nodes = far_mask.size(0)
+    question = (torch.arange(num_nodes, device=far_mask.device) == 0).unsqueeze(0)
+    names, groups = ["q"], [far_mask & question]
+    for low, high in bins:
+        names.append(f"[{low},{'inf' if math.isinf(high) else int(high)})")
+        groups.append(far_mask & distance_bin_mask(num_nodes, low, high, far_mask.device))
+    rest = far_mask & ~torch.stack(groups).any(0)
+    if rest.any():
+        names.append("other")
+        groups.append(rest)
+    return names, torch.stack(groups)
+
+
+def hierarchical_mc_kl(far_T: torch.Tensor, far_S: torch.Tensor, groups: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """v4 Eq. hierarchical over {REST} U groups: (top [N], within [G, N]) with top = KL(pi_T || pi_S) and
+    within_g = pi_T(g) KL(D_T(.|g) || D_S(.|g)). top + within.sum(0) = mc_kl_rows: same loss, same gradient."""
+    far_T, far_S = _full(far_T), _full(far_S)
+    g = groups.to(far_T.dtype)
+    pi_T, pi_S = (far_T.unsqueeze(0) * g).sum(-1), (far_S.unsqueeze(0) * g).sum(-1)  # [G, N]
+    top = mc_kl_rows(pi_T.transpose(0, 1), pi_S.transpose(0, 1))
+    within = [pi_T[k] * kl_rows(far_T * g[k] / pi_T[k].clamp_min(EPS).unsqueeze(-1),
+                                far_S * g[k] / pi_S[k].clamp_min(EPS).unsqueeze(-1)) for k in range(g.size(0))]
+    return top, torch.stack(within)
+
+
+def mass_gap_by_bin(far_T: torch.Tensor, far_S: torch.Tensor, rows: torch.Tensor, groups: torch.Tensor,
+                    names: list[str]) -> list[dict]:
+    """Unconditional mass gap per group of one trace (v4 Eq. massmetrics) as sums + counts, so traces pool:
+    dM = sum_{j in g} D_S(j) - sum_{j in g} D_T(j) over the rows with a target in g; absdM is |dM|."""
+    rows = _bool_rows(rows, far_T)
+    diff = ((_full(far_S) - _full(far_T)).unsqueeze(0) * groups.to(_full(far_T).dtype)).sum(-1)  # [G, N]
+    present = groups.any(-1) & rows.unsqueeze(0)
+    out = []
+    for k, name in enumerate(names):
+        d = diff[k][present[k]]
+        out.append({"bin": name, "dM_sum": float(d.sum()), "absdM_sum": float(d.abs().sum()), "count": int(present[k].sum())})
+    return out
 
 
 # ---------------------------------------------------------------- diagnostics (Sec. 5)

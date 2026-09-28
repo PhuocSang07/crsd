@@ -3,7 +3,10 @@
 Every arm (SFT baseline B1 and all CSRD variants) uses this entry point with the same data, LoRA,
 schedule and seed; only the --csrd-* flags differ. --csrd-lambda 0 (default) is plain SFT.
 
-    L = L_CE + lambda_r * (L_route + (lambda_m/lambda_r) L_mass + (lambda_c/lambda_r) L_causal)
+    L = L_CE + lambda_r * (L_route + (lambda_m/lambda_r) L_mass + (lambda_c/lambda_r) L_causal)   (v3)
+    L = L_CE + lambda * KL(D_T || D_S) over {REST} U F(i)          (--csrd-objective mc_raw / mc_syn, MC-CSRD v4)
+
+--csrd-objective none with a signal bank trains plain SFT and logs the routing/mass metrics (v4 arm B0).
 
 CE is chunked over the final hidden states (masked_loss.chunked_cross_entropy).
 Settings come from CLI flags or --config (yaml).
@@ -21,7 +24,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingA
 
 import attention_capture
 from csrd_data import CSRD_KEY, CSRDCollator, CSRDDataset
-from csrd_trainer import HEADS_FILE, CSRDLossMixin
+from csrd_trainer import HEADS_FILE, OBJECTIVES, CSRDLossMixin
 from masked_loss import chunked_cross_entropy
 from receiver_heads import band_layers
 from training_utils import compensate_global_token_mean, set_training_seed
@@ -196,6 +199,14 @@ def main() -> None:
     parser.add_argument("--csrd-ramp-frac", type=float)
     parser.add_argument("--csrd-qk-rank", type=int, help="CSRD-QK: rank of the separate Q/K adapter (0 = off)")
     parser.add_argument("--csrd-grad-log-interval", type=int)
+    parser.add_argument("--csrd-objective", choices=OBJECTIVES, help="auxiliary loss (default route_mass = v3; "
+                        "mc_raw = MC-CSRD, needs a bank with raw mass M; none = SFT with routing metrics)")
+    parser.add_argument("--csrd-band-reduction", choices=("sum", "mean"), help="per-band losses summed (v3, default) "
+                        "or averaged (v4)")
+    parser.add_argument("--csrd-query-weighting", choices=("uniform", "unbiased"), help="pooling of the sampled "
+                        "queries: plain mean (v3, default) or unbiased for the step's token mean (v4)")
+    parser.add_argument("--csrd-probe-microbatches", type=int, help="gradient-norm probe of every objective on the first "
+                        "K microbatches after the warmup -> csrd-norm-probe.json (default 0 = off)")
     args = parser.parse_args()
 
     config = yaml.safe_load(Path(args.config).read_text()) if args.config else {}
@@ -209,22 +220,27 @@ def main() -> None:
         "csrd_bands": "0,1", "csrd_d_min": 4,
         "csrd_queries": 8, "csrd_k_student": 16, "csrd_head_mode": "receiver", "csrd_score": "excess_bg",
         "csrd_anchor_beta": 0.0, "csrd_loss_form": "pooled", "csrd_warmup_frac": 0.1, "csrd_ramp_frac": 0.1,
-        "csrd_qk_rank": 0, "csrd_grad_log_interval": 50,
+        "csrd_qk_rank": 0, "csrd_grad_log_interval": 50, "csrd_objective": "route_mass",
+        "csrd_band_reduction": "sum", "csrd_query_weighting": "uniform", "csrd_probe_microbatches": 0,
     }
     for key, value in defaults.items():
         config.setdefault(key, value)
     missing = [key for key in ("model_name", "data_path", "output_dir") if key not in config]
     if missing:
         parser.error(f"missing required settings: {missing}")
-    use_csrd = config["csrd_lambda"] > 0
+    use_csrd = config["csrd_lambda"] > 0 or config["csrd_objective"] == "none"
     if use_csrd and not config.get("signals"):
-        parser.error("--csrd-lambda > 0 needs --signal-bank")
+        parser.error("--csrd-lambda > 0 (or --csrd-objective none) needs --signal-bank")
     if use_csrd:
         from signal_bank import SignalSource
 
-        info = SignalSource(config["signals"]).info
+        source = SignalSource(config["signals"])
+        info = source.info
         if info.get("d_min") is not None and info["d_min"] != config["csrd_d_min"]:
             parser.error(f"--csrd-d-min {config['csrd_d_min']} differs from the signals' d_min ({info['d_min']})")
+        if config["csrd_objective"] == "mc_raw" and source.ids() and "M" not in source.get(source.ids()[0]):
+            parser.error(f"--csrd-objective mc_raw: {config['signals']} has no raw mass M (re-extract with the v4 "
+                         "extract_routing.py, e.g. BANK_SUFFIX=-mc scripts/teacher/teacher_qwen3-8b.sh)")
         print(f"teacher signals: {info.get('model')} score={info.get('score')} style={info.get('style')} "
               f"source={info.get('source')} d_min={info.get('d_min')}")
 
@@ -263,7 +279,8 @@ def main() -> None:
             key: config[key] for key in (
                 "csrd_lambda", "csrd_mass_ratio", "csrd_causal_ratio", "csrd_route_ratio", "csrd_d_min", "csrd_queries",
                 "csrd_k_student", "csrd_head_mode", "csrd_score", "csrd_anchor_beta", "csrd_loss_form",
-                "csrd_warmup_frac", "csrd_ramp_frac", "csrd_grad_log_interval",
+                "csrd_warmup_frac", "csrd_ramp_frac", "csrd_grad_log_interval", "csrd_objective",
+                "csrd_band_reduction", "csrd_query_weighting", "csrd_probe_microbatches",
             )
         })
         trainer_kwargs["csrd_student_heads"] = json.loads(Path(heads_path).read_text()) if heads_path else None
@@ -313,6 +330,7 @@ def main() -> None:
         "supervised_tokens": dataset.supervised_token_count(), "epochs": config["epochs"],
         "seed": config["seed"], "learning_rate": config["learning_rate"],
         "csrd_lambda": config["csrd_lambda"], "csrd_qk_rank": config["csrd_qk_rank"],
+        "csrd_objective": config["csrd_objective"] if use_csrd else None,
         "train_runtime_s": result.metrics.get("train_runtime"), "final_train_loss": result.metrics.get("train_loss"),
         "train_samples_per_second": result.metrics.get("train_samples_per_second"),
         # Sec. 6.7 efficiency (rank 0)

@@ -5,8 +5,9 @@
     --stage select     (CPU) top-K heads per depth band -> heads-<score>.json, plus random-K (A2) and
                        all-band controls, with split-half stability
     --stage targets    selected heads on every record -> <output-dir>/<id>.npz with P [bands, N, N]
-                       (band-averaged far routing, lower triangular), Z [bands, N] (far mass), rows [N],
-                       char_spans [N, 2], hash [N]
+                       (band-averaged far routing, lower triangular), Z [bands, N] (far mass), M [bands, N, N]
+                       (band-averaged raw far mass, MC-CSRD's D_T), rows [N], char_spans [N, 2], hash [N]
+                       Every row averages all tokens of its step uniformly (the query measure MC-CSRD matches).
 
 Also reads the student for diagnostics (--adapter, --qk-restore). Attention is recomputed from the
 captured q/k in query blocks with an exact full-row softmax, so no T x T matrix is ever stored.
@@ -227,6 +228,7 @@ def extract_targets(extractor: RoutingExtractor, records: list[dict], heads_json
             continue
         num_nodes = len(record["nodes"])
         P = torch.zeros(len(bands), num_nodes, num_nodes, device=extractor.device)
+        M = torch.zeros(len(bands), num_nodes, num_nodes, device=extractor.device)
         Z = torch.zeros(len(bands), num_nodes, device=extractor.device)
         per_head_R, per_head_md = {}, {}
 
@@ -234,6 +236,7 @@ def extract_targets(extractor: RoutingExtractor, records: list[dict], heads_json
             for index, head in enumerate(heads):
                 b = band_of[(layer, head)]
                 P[b] += out["R"][index].to(P.device) / len(bands[b])
+                M[b] += out["M"][index].to(M.device) / len(bands[b])
                 Z[b] += out["Z"][index].to(Z.device) / len(bands[b])
                 per_head_md[(layer, head)] = float(out["mean_distance"][index])
                 if save_per_head:
@@ -243,6 +246,7 @@ def extract_targets(extractor: RoutingExtractor, records: list[dict], heads_json
         payload = {
             "P": P.cpu().numpy().astype(np.float32),
             "Z": Z.cpu().numpy().astype(np.float32),
+            "M": M.cpu().numpy().astype(np.float32),
             "rows": valid_rows(far).cpu().numpy(),
             "char_spans": record_char_spans(record),
             "hash": record_hashes(record),
@@ -312,7 +316,8 @@ def main() -> None:
              "heads_json": args.heads_json, "d_min": args.d_min, "score": heads_json["score"],
              "num_layers": extractor.num_layers, "num_heads": extractor.num_heads,
              "bands": heads_json.get("bands"), "band_layers": heads_json.get("band_layers"),
-             "style": style, "source": args.source_name, "data_path": args.data_path}, indent=2))
+             "style": style, "source": args.source_name, "data_path": args.data_path,
+             "raw_mass": True, "query_measure": "every token of the step, uniform"}, indent=2))
 
 
 if __name__ == "__main__":

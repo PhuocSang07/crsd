@@ -5,6 +5,8 @@
 Tags "<arm>-<track>[-s<seed>]" are pooled over seeds; every arm is compared with --baseline:
 per-benchmark deltas, G5 accuracy (mean pass@1 >= +1.5 pp over SFT), and a problem-level paired
 permutation test (all benchmarks pooled) with Holm correction over the CSRD arms (Sec. 6.4).
+Per benchmark, every arm vs --baseline and every --contrasts pair also gets the paired difference of per-problem
+pass@1 with a bootstrap CI over problems (v4 Sec. 7.6: completions of a problem stay together, arms stay paired).
 """
 
 import argparse
@@ -67,6 +69,32 @@ def significance(results_dir: Path, runs, baseline: str, family: str) -> dict[st
                   "p": raw_p[arm], "p_holm": adjusted.get(arm, float("nan"))} for arm in raw_p}
 
 
+def paired_contrasts(results_dir: Path, pairs: list[tuple[str, str]], benchmarks: list[str],
+                     resamples: int = 10000, seed: int = 0) -> dict[str, dict]:
+    """{"A vs B": {benchmark: Δ pass@1 (pp), bootstrap 95% CI over problems, sign-flip p, problems}} per benchmark."""
+    cache: dict[str, dict] = {}
+    out = {}
+    for arm, reference in pairs:
+        for tag in (arm, reference):
+            if tag not in cache:
+                cache[tag] = per_problem_pass1(results_dir, tag, benchmarks)
+        rows = {}
+        for name in benchmarks:
+            keys = sorted(k for k in set(cache[arm]) & set(cache[reference]) if k[0] == name)
+            if not keys:
+                continue
+            a = np.asarray([cache[arm][k] for k in keys])
+            b = np.asarray([cache[reference][k] for k in keys])
+            diff = a - b
+            boot = diff[np.random.default_rng(seed).integers(0, diff.size, (resamples, diff.size))].mean(1)
+            rows[name] = {"delta_pp": float(diff.mean()) * 100,
+                          "ci_pp": [float(np.quantile(boot, 0.025)) * 100, float(np.quantile(boot, 0.975)) * 100],
+                          "p": paired_permutation_test(a, b), "problems": int(diff.size)}
+        if rows:
+            out[f"{arm} vs {reference}"] = rows
+    return out
+
+
 def cell(rows: list[dict], metric: str) -> tuple[float, float] | None:
     values = [r[metric] for r in rows if metric in r]
     return (float(np.mean(values)), float(np.std(values, ddof=1)) if len(values) > 1 else 0.0) if values else None
@@ -104,6 +132,7 @@ def main() -> None:
     parser.add_argument("--track", help="keep only runs of this track (tags '<arm>-<track>[-s<seed>]')")
     parser.add_argument("--baseline", help="arm tag (seed stripped) every other arm is compared with (default sft-<track>)")
     parser.add_argument("--family", default=r"^csrd-(?!qkrestore)", help="regex of the arms forming the Holm family")
+    parser.add_argument("--contrasts", help="extra paired contrasts 'armA:armB,...' (seed-stripped tags)")
     args = parser.parse_args()
 
     runs = load(Path(args.results_dir))
@@ -130,8 +159,22 @@ def main() -> None:
     if gates:
         output += "\n\n### G5 (pass@1 criterion)\n\n" + "\n".join(
             f"- {tag}: {g['delta_pass@1_pp']:+.2f} pp -> {'PASS' if g['G5_accuracy'] else 'fail'}" for tag, g in gates.items())
+    pairs = [(tag, args.baseline) for tag in runs if tag != args.baseline] if args.baseline in runs else []
+    for item in filter(None, (args.contrasts or "").split(",")):
+        arm, reference = item.split(":")
+        if arm in runs and reference in runs and (arm, reference) not in pairs:
+            pairs.append((arm, reference))
+    benchmarks = [b for b in BENCHMARK_ORDER if any(b in r for r in runs.values())]
+    contrasts = paired_contrasts(Path(args.results_dir), pairs, benchmarks)
+    if contrasts:
+        output += ("\n\n### Paired contrasts per benchmark (Δ pass@1 in pp, 95% bootstrap CI over problems, sign-flip p)\n\n"
+                   "| Contrast | " + " | ".join(benchmarks) + " |\n|" + "---|" * (len(benchmarks) + 1) + "\n"
+                   + "\n".join(f"| {name} | " + " | ".join(
+                       f"{r[b]['delta_pp']:+.2f} [{r[b]['ci_pp'][0]:+.2f}, {r[b]['ci_pp'][1]:+.2f}] p={r[b]['p']:.3f}"
+                       if b in r else "-" for b in benchmarks) + " |" for name, r in contrasts.items()))
     print(output)
     suffix = f"-{args.track}" if args.track else ""
+    Path(args.results_dir, f"contrasts{suffix}.json").write_text(json.dumps(contrasts, indent=2))
     Path(args.results_dir, f"comparison-table{suffix}.md").write_text(output + "\n")
     Path(args.results_dir, f"gates-g5{suffix}.json").write_text(json.dumps(gates, indent=2))
     Path(args.results_dir, f"significance{suffix}.json").write_text(json.dumps(tests, indent=2))

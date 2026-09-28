@@ -65,6 +65,7 @@ class CSRDDataset(Dataset):
             "node_spans": torch.tensor([[n["token_start"], n["token_end"]] for n in record["nodes"]], dtype=torch.long),
             "P": torch.from_numpy(np.asarray(target["P"], dtype=np.float32)),
             "Z": torch.from_numpy(np.asarray(target["Z"], dtype=np.float32)),
+            **({"M": torch.from_numpy(np.asarray(target["M"], dtype=np.float32))} if "M" in target else {}),
             "rows": torch.from_numpy(np.asarray(target["rows"]).astype(bool)),
             "anchor": torch.tensor(record.get("anchor") or [0] * len(record["nodes"]), dtype=torch.float32),
         }

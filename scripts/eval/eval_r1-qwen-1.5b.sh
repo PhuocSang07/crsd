@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Phase 4: eval -- DeepSeek-R1-Distill-Qwen-1.5B track, P-ALIGN protocol and grader (same as SGL eval_r1-qwen-1.5b.sh).
 # Usage: scripts/eval/eval_r1-qwen-1.5b.sh [CKPT] [TAG]      (CKPT = adapter dir, full model dir, or "base")
-# Env: BENCHMARKS, MAX_MODEL_LEN / MAX_TOKENS (4096 / 3584), RESULTS_DIR, EVAL_LOG (the 32k cap: eval32k_r1-qwen-1.5b.sh).
+# Env: BENCHMARKS, MAX_MODEL_LEN / MAX_TOKENS (4096 / 3584), N_SAMPLES (3), RESULTS_DIR, EVAL_LOG, GPU_MEM_UTIL (0.9)
+# (the 32k cap: eval32k_r1-qwen-1.5b.sh).
 set -euo pipefail
 
 read -ra GPUS <<< "${GPUS:-0}"
@@ -47,7 +48,7 @@ PROTOCOL=palign
 TEMPERATURE=0.6
 TOP_P=0.9
 REP_PENALTY=1.05
-N_SAMPLES=3
+N_SAMPLES="${N_SAMPLES:-3}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_TOKENS="${MAX_TOKENS:-$(( MAX_MODEL_LEN - 512 ))}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
