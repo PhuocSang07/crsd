@@ -16,7 +16,8 @@ export VLLM_DO_NOT_TRACK=1
 export DO_NOT_TRACK=1
 export HF_HUB_DISABLE_SYMLINKS_WARNING=1
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARNING}"
-export BENCH_DATA_ROOT="${BENCH_DATA_ROOT-/mnt/local/_data/aiskylimit_new_nothingnew_2}"
+LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-/mnt/local/_data/aiskylimit_new_nothingnew_2}"
+export BENCH_DATA_ROOT="${BENCH_DATA_ROOT-${LOCAL_DATA_ROOT}}"   # the 4 test sets (download.txt mirrors)
 
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROJECT_ENV="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}"
