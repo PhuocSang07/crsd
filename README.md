@@ -114,6 +114,7 @@ bash scripts/data/data_r1-qwen-1.5b.sh            # Phase 1: canonical s1K-1.1 +
 GPUS="0 1 2 3" bash scripts/teacher/teacher_qwen3-8b.sh   # Phase 2: bank tín hiệu Qwen3-8B (bỏ qua nếu đã có file bank)
 GPUS="0 1 2 3" CSRD_LAMBDA=0.1 bash scripts/csrd/csrd_lora_r1-qwen-1.5b.sh   # Phase 3: -> checkpoints/csrd-lora-l0.1-r1-qwen-1.5b
 bash scripts/eval/eval_r1-qwen-1.5b.sh checkpoints/csrd-lora-l0.1-r1-qwen-1.5b csrd-lora-l0.1-r1-qwen-1.5b   # Phase 4: P-ALIGN
+bash scripts/eval/eval32k_r1-qwen-1.5b.sh        # cap 32k, MATH500 + AIME24, mọi checkpoints/*-r1-qwen-1.5b -> results-32k/
 ```
 
 Train: `train_sft.py` + DeepSpeed ZeRO-2 offload, LoRA r16/α16, lr 5e-5 → 1e-5, 3 epoch, batch hiệu dụng 32 (= #GPU × GA),

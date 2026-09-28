@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # CSRD driver (read mode) -- DeepSeek-R1-Distill-Qwen-1.5B student, Qwen3-8B teacher, s1K-1.1. The SFT control is
-# the SGL vanilla run of the same config (not retrained here). Each variant is trained, then evaluated (P-ALIGN 4k).
+# the SGL vanilla run of the same config (not retrained here). Each variant is trained, then evaluated (P-ALIGN 4k);
+# at the end every checkpoint is also evaluated under the 32k cap on MATH500 + AIME24 (results-32k/).
 # Usage: GPUS="0" bash project_commands_csrd_r1-qwen-1.5b.sh        (one GPU: variants run one after another)
 # New server: scripts/setup.sh (needs PyPI) -> scripts/data/download_r1-qwen-1.5b.sh (needs HF Hub) -> this (offline).
 # VARIANTS: space-separated name:lambda:mass_ratio:bands:d_min, in priority order (a finished variant is skipped).
@@ -47,3 +48,6 @@ done
 # Copy SpectralGuidedLearning/results/{vanilla,spectral-lora}-r1-qwen-1.5b into results-palign/ first.
 PYTHONPATH="${BASE}/src" "${PROJECT_ENV:-/mnt/local/uvenvs/crsd}/bin/python" "${BASE}/src/compare_results.py" \
   --results-dir results-palign --track r1-qwen-1.5b --baseline vanilla-r1-qwen-1.5b || true
+
+# ======================= EVAL 32k (MATH500 + AIME24) ======================
+GPUS="${GPUS%% *}" bash scripts/eval/eval32k_r1-qwen-1.5b.sh

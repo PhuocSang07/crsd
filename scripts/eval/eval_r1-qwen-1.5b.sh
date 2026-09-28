@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Phase 4: eval -- DeepSeek-R1-Distill-Qwen-1.5B track, P-ALIGN protocol and grader (same as SGL eval_r1-qwen-1.5b.sh).
 # Usage: scripts/eval/eval_r1-qwen-1.5b.sh [CKPT] [TAG]      (CKPT = adapter dir, full model dir, or "base")
+# Env: BENCHMARKS, MAX_MODEL_LEN / MAX_TOKENS (4096 / 3584), RESULTS_DIR, EVAL_LOG (the 32k cap: eval32k_r1-qwen-1.5b.sh).
 set -euo pipefail
 
 read -ra GPUS <<< "${GPUS:-0}"
@@ -41,7 +42,7 @@ TAG="csrd-lora-l0.1-r1-qwen-1.5b"
 [[ -d "${BASE_MODEL}" ]] || { echo "missing local model ${BASE_MODEL} (download.txt)" >&2; exit 1; }
 [[ -d "${MODEL}" ]] || { echo "missing checkpoint ${MODEL}" >&2; exit 1; }
 
-BENCHMARKS="math500,aime24,aime25,amc12"
+BENCHMARKS="${BENCHMARKS:-math500,aime24,aime25,amc12}"
 PROTOCOL=palign
 TEMPERATURE=0.6
 TOP_P=0.9
@@ -58,6 +59,7 @@ PROMPT_STYLE=sgl
 ENFORCE_EAGER=true
 LORA_R=16
 RESULTS_DIR="${RESULTS_DIR:-${BASE_PATH}/results-palign}"
+EVAL_LOG="${EVAL_LOG:-${BASE_PATH}/logs/eval-${TAG}.log}"
 
 OPTS=""
 OPTS+=" --model ${MODEL}"
@@ -88,4 +90,4 @@ OPTS+=" --results-dir ${RESULTS_DIR}"
 
 CMD="python ${BASE_PATH}/src/evaluate.py ${OPTS}"
 echo "${CMD}"
-${CMD} 2>&1 | tee "${BASE_PATH}/logs/eval-${TAG}.log"
+${CMD} 2>&1 | tee "${EVAL_LOG}"
