@@ -146,7 +146,7 @@ ARM=b3 bash scripts/csrd/mc_csrd_lora_r1-qwen-1.5b.sh    # một arm (b1-b4 cầ
 bash scripts/diag/diag_mass_r1-qwen-1.5b.sh              # H1: E_Z, ΔM theo bin, KL_raw trên 300 trace held-out, CI ghép cặp vs b1
 ```
 
-Chẩn đoán held-out cần `data/canonical/openr1-heldout.jsonl` (5 MB, chép từ máy dev) hoặc bản mirror OpenR1-Math-220k.
+Chẩn đoán held-out đọc `data/canonical/openr1-heldout.jsonl` (5 MB, có sẵn trong repo; 0 câu trùng 13-gram với s1K và 4 tập test).
 Log train có thêm `csrd_ez_b*` (|Z_S − Z_T|), `csrd_dM_<bin>` (ΔM không điều kiện), `csrd_mcber_b*` + `csrd_mccond_b*`
 (= `loss_mc_raw` theo chain rule), `grad_{ce,route}_{qk,vo,mlp}`. Với head cố định, các chỉ số này có từ bước 0 (cả warmup).
 

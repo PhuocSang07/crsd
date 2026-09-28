@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Held-out traces for the MC-CSRD diagnostics (v4 Sec. 7.4) -- 300 OpenR1-Math R1 traces rendered for the Qwen3-8B teacher
 # (thinking) and the R1-Distill-Qwen-1.5B student (SGL), with the segmentation of data_r1-qwen-1.5b.sh.
-# Needs data/canonical/openr1-heldout.jsonl: copy it from the machine that built it (5 MB, 13-gram-disjoint from s1K and
-# the test sets), or mirror open-r1/OpenR1-Math-220k into LOCAL_DATA_ROOT (download.txt) and it is rebuilt here.
+# Reads data/canonical/openr1-heldout.jsonl, tracked in the repo (5 MB, no 13-gram overlap with s1K or the four test
+# sets); without it, mirror open-r1/OpenR1-Math-220k into LOCAL_DATA_ROOT (download.txt) and it is rebuilt here.
 set -euo pipefail
 
 BASE_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -42,7 +42,7 @@ LABELER=heuristic
 
 if [[ ! -s "${CANONICAL_PATH}" ]]; then
   [[ -d "${OPENR1_PATH}" ]] || {
-    echo "missing ${CANONICAL_PATH}: copy it from the dev box, or mirror open-r1/OpenR1-Math-220k to ${OPENR1_PATH}" >&2
+    echo "missing ${CANONICAL_PATH} (tracked in the repo: git checkout it), or mirror OpenR1-Math-220k to ${OPENR1_PATH}" >&2
     exit 1
   }
   CMD="python ${BASE_PATH}/src/build_canonical.py --source openr1 --input ${OPENR1_PATH} --limit ${N_HELDOUT} --seed 42 --output-path ${CANONICAL_PATH}"

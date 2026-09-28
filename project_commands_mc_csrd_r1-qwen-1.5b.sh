@@ -5,7 +5,7 @@
 # protocols -> paired comparisons (H2) -> held-out mass diagnostics on fixed heads (H1). Finished steps are skipped.
 # Usage: GPUS="0" bash project_commands_mc_csrd_r1-qwen-1.5b.sh
 # New server: scripts/setup.sh (needs PyPI) -> scripts/data/download_r1-qwen-1.5b.sh (needs HF Hub) -> this (offline);
-# copy data/canonical/openr1-heldout.jsonl for the held-out diagnostics (scripts/data/heldout_r1-qwen-1.5b.sh).
+# the held-out diagnostics read data/canonical/openr1-heldout.jsonl (tracked in the repo).
 # Env: ARMS (order of b0 b1 b2 b3 b4; b0 first, its heads and gradient probe feed the others), MC_LAMBDA (0.2, band
 # mean), EVAL_BASE (1: also evaluate the untrained student), N_SAMPLES_32K (3), GPU_MEM_UTIL (vLLM, 0.9).
 set -euo pipefail
@@ -97,7 +97,7 @@ done
 if [[ -s data/canonical/openr1-heldout.jsonl || -s data/records/openr1-heldout-DeepSeek-R1-Distill-Qwen-1.5B-sgl.jsonl ]]; then
   GPUS="${GPUS%% *}" REFERENCE="${B1_TAG%-${TRACK}}" bash scripts/diag/diag_mass_r1-qwen-1.5b.sh
 else
-  echo "skip the held-out diagnostics: copy data/canonical/openr1-heldout.jsonl here, then run scripts/diag/diag_mass_r1-qwen-1.5b.sh"
+  echo "skip the held-out diagnostics: data/canonical/openr1-heldout.jsonl is missing (git checkout it)"
 fi
 echo ">>> results: ${RESULTS_4K}/comparison-table-${TRACK}.md (4k), ${RESULTS_32K}/comparison-table-${TRACK}.md (32k AIME),"
 echo ">>> contrasts-${TRACK}.json in both, results/diag-mass/mass-diagnostics.md (H1)."
