@@ -7,10 +7,40 @@
 # New server: scripts/setup.sh (needs PyPI) -> scripts/data/download_r1-qwen-1.5b.sh (needs HF Hub) -> this (offline);
 # the held-out diagnostics read data/canonical/openr1-heldout.jsonl (tracked in the repo).
 # Env: ARMS (order of b0 b1 b2 b3 b4; b0 first, its heads and gradient probe feed the others), MC_LAMBDA (0.2, band
-# mean), EVAL_BASE (1: also evaluate the untrained student), N_SAMPLES_32K (3), GPU_MEM_UTIL (vLLM, 0.9).
+# mean), EVAL_BASE (1: also evaluate the untrained student), N_SAMPLES_32K (3), GPU_MEM_UTIL (vLLM, 0.9),
+# LOCAL_MODELS_ROOT (/path/models), LOCAL_DATA_ROOT / BENCH_DATA_ROOT (auto-detected, see PATHS), PROJECT_ENV.
 set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${BASE}"
+
+# ============================ PATHS ============================
+# Models: /path/models (the H200 layout the 28/09 runs used). Data and the four test sets: LOCAL_DATA_ROOT /
+# BENCH_DATA_ROOT when set, else the first candidate holding aime24/. Exported, so every sub-script reads the same paths.
+export PROJECT_ENV="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}"
+export LOCAL_MODELS_ROOT="${LOCAL_MODELS_ROOT:-/path/models}"
+if [[ -z "${LOCAL_DATA_ROOT:-}" ]]; then
+  for candidate in /path/data /path/datasets /path/models /path /mnt/local/_data/aiskylimit_new_nothingnew_2; do
+    [[ -d "${candidate}/aime24" ]] && { LOCAL_DATA_ROOT="${candidate}"; break; }
+  done
+fi
+export LOCAL_DATA_ROOT="${LOCAL_DATA_ROOT:-/mnt/local/_data/aiskylimit_new_nothingnew_2}"
+export BENCH_DATA_ROOT="${BENCH_DATA_ROOT-${LOCAL_DATA_ROOT}}"
+missing=()
+[[ -x "${PROJECT_ENV}/bin/python" ]] || missing+=("${PROJECT_ENV}/bin/python (PROJECT_ENV)")
+for model in DeepSeek-R1-Distill-Qwen-1.5B Qwen3-8B; do
+  [[ -d "${LOCAL_MODELS_ROOT}/${model}" ]] || missing+=("${LOCAL_MODELS_ROOT}/${model} (LOCAL_MODELS_ROOT)")
+done
+if [[ -n "${BENCH_DATA_ROOT}" ]]; then  # "" = read the test sets from the HF cache instead
+  for bench in aime24 aime25 aimo-validation-amc MATH-500; do
+    [[ -d "${BENCH_DATA_ROOT}/${bench}" ]] || missing+=("${BENCH_DATA_ROOT}/${bench} (BENCH_DATA_ROOT / LOCAL_DATA_ROOT)")
+  done
+fi
+if (( ${#missing[@]} )); then
+  printf 'missing: %s\n' "${missing[@]}" >&2
+  echo "set PROJECT_ENV / LOCAL_MODELS_ROOT / LOCAL_DATA_ROOT (or BENCH_DATA_ROOT) to where they are on this server" >&2
+  exit 1
+fi
+echo "models ${LOCAL_MODELS_ROOT} | data ${LOCAL_DATA_ROOT} | benchmarks ${BENCH_DATA_ROOT:-HF cache} | env ${PROJECT_ENV}"
 
 CUDA_GPUS="${CUDA_VISIBLE_DEVICES:-}"
 export GPUS="${GPUS:-${CUDA_GPUS:+${CUDA_GPUS//,/ }}}"
@@ -20,7 +50,7 @@ MC_LAMBDA="${MC_LAMBDA:-0.2}"
 ARMS="${ARMS:-b0 b3 b1 b4 b2}"
 EVAL_BASE="${EVAL_BASE:-1}"
 N_SAMPLES_32K="${N_SAMPLES_32K:-3}"
-PY="${PROJECT_ENV:-/mnt/local/uvenvs/crsd}/bin/python"
+PY="${PROJECT_ENV}/bin/python"
 TRACK=r1-qwen-1.5b
 RESULTS_4K=results-palign
 RESULTS_32K=results-32k-aime
