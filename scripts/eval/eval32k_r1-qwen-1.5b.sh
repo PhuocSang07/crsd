@@ -18,6 +18,8 @@ export RESULTS_DIR="${RESULTS_DIR:-${BASE_PATH}/results-32k}"
 export BENCHMARKS="${BENCHMARKS:-math500,aime24}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 export MAX_TOKENS="${MAX_TOKENS:-30720}"
+# KV at 28 KB/token: AIME's 90 sequences average ~15k tokens (~39 GB, 79 GB if all hit the cap); 0.5 of an H200 = 70 GB.
+export GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"
 mkdir -p "${RESULTS_DIR}" logs
 
 run_eval() {  # run_eval <model path> <tag>

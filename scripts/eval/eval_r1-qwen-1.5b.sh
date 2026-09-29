@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Phase 4: eval -- DeepSeek-R1-Distill-Qwen-1.5B track, P-ALIGN protocol and grader (same as SGL eval_r1-qwen-1.5b.sh).
 # Usage: scripts/eval/eval_r1-qwen-1.5b.sh [CKPT] [TAG]      (CKPT = adapter dir, full model dir, or "base")
-# Env: BENCHMARKS, MAX_MODEL_LEN / MAX_TOKENS (4096 / 3584), N_SAMPLES (3), RESULTS_DIR, EVAL_LOG, GPU_MEM_UTIL (0.9)
+# Env: BENCHMARKS, MAX_MODEL_LEN / MAX_TOKENS (4096 / 3584), N_SAMPLES (3), RESULTS_DIR, EVAL_LOG, GPU_MEM_UTIL (0.3)
 # (the 32k cap: eval32k_r1-qwen-1.5b.sh).
 set -euo pipefail
 
@@ -52,7 +52,9 @@ N_SAMPLES="${N_SAMPLES:-3}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_TOKENS="${MAX_TOKENS:-$(( MAX_MODEL_LEN - 512 ))}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.9}"
+# vLLM preallocates this share of GPU memory. R1-Distill-1.5B: 3.5 GB weights + 28 KB KV per token, so the 4k batch
+# (64 problems x 3 samples x 4096) needs ~23 GB of KV: 0.3 of an H200 (42 GB) is enough. The 32k wrapper uses 0.5.
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.3}"
 # R1-Distill-Qwen-1.5B has 2 KV heads: tensor parallel 1 or 2
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 SEED=42

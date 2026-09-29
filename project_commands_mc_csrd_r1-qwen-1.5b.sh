@@ -7,7 +7,7 @@
 # New server: scripts/setup.sh (needs PyPI) -> scripts/data/download_r1-qwen-1.5b.sh (needs HF Hub) -> this (offline);
 # the held-out diagnostics read data/canonical/openr1-heldout.jsonl (tracked in the repo).
 # Env: ARMS (order of b0 b1 b2 b3 b4; b0 first, its heads and gradient probe feed the others), MC_LAMBDA (0.2, band
-# mean), EVAL_BASE (1: also evaluate the untrained student), N_SAMPLES_32K (3), GPU_MEM_UTIL (vLLM, 0.9),
+# mean), EVAL_BASE (1: also evaluate the untrained student), N_SAMPLES_32K (3), GPU_MEM_UTIL (vLLM share; 0.3 at 4k, 0.5 at 32k),
 # LOCAL_MODELS_ROOT (/path/models), LOCAL_DATA_ROOT / BENCH_DATA_ROOT (auto-detected, see PATHS), PROJECT_ENV.
 set -euo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
