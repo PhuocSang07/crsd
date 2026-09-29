@@ -93,4 +93,11 @@ OPTS+=" --results-dir ${RESULTS_DIR}"
 
 CMD="python ${BASE_PATH}/src/evaluate.py ${OPTS}"
 echo "${CMD}"
-${CMD} 2>&1 | tee "${EVAL_LOG}"
+# vLLM aborts its startup when another process on the GPU frees memory while it profiles ("Error in memory profiling");
+# that race clears on a retry. Any other failure stops here.
+for attempt in 1 2 3; do
+  if ${CMD} 2>&1 | tee "${EVAL_LOG}"; then exit 0; fi
+  grep -q "Error in memory profiling" "${EVAL_LOG}" && (( attempt < 3 )) || exit 1
+  echo ">>> vLLM memory profiling raced with another GPU process; retry ${attempt}/2 in 30 s" >&2
+  sleep 30
+done
